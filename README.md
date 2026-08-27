@@ -145,16 +145,38 @@ docker compose -f docker/compose.yml up --abort-on-container-exit --build
 - **option 61 的 `01` + MAC 形式**。udhcpc、dhclient、多数 BMC 固件发的
   客户端标识是"硬件类型 1 + 6 字节 MAC"，与裸 MAC 指同一台设备。
   不归一的话，按 MAC 配的静态保留对这些客户端**全部失效**。
-- **PXE 固件要求应答里带 option 60 = `PXEClient`**。没有它，固件会丢弃
-  我们的 OFFER 一直重发 DISCOVER —— 现象是机器起不来，但服务端日志
-  显示"已应答"，极难定位。引导文件名也要同时写进 BOOTP 的 `file` 字段，
-  部分固件不看 option 67。
+- **应答的源端口必须是 67**。RFC 2131 规定服务端从 67 发往客户端的 68。
+  dhclient、udhcpc 这类客户端不校验源端口，所以发送 socket 绑在临时端口上
+  也一路绿灯；**PXE 固件会校验**，源端口不对的 OFFER 被静默丢弃 ——
+  现象是服务端日志一行行"已应答"，客户端却一直重发 DISCOVER。
+  这也是收发必须共用一个 socket 的原因（拆成两个都绑 67 的话，Linux 上
+  单播的续租请求会落到不读包的那一个上）。
+- **只声明 option 60 = `PXEClient` 却不给 option 43，固件会不引导**。
+  声明 `PXEClient` 等于说"我提供 PXE 引导服务"，固件随即去 option 43 里
+  找引导服务器列表；找不到就停在那儿 —— 地址拿到了，TFTP 一个请求都不发。
+  VMware UEFI 固件上的三组对照：
+
+  | option 60 | option 43 | 结果 |
+  | --- | --- | --- |
+  | 无 | 无 | 正常引导 |
+  | 有 | 有 | 正常引导 |
+  | 有 | 无 | 拿到 ACK 后什么都不做 |
+
+  所以 lessor 只在配了 option 43 时才声明 option 60。不做 PXE 菜单的话，
+  siaddr + BOOTP `file` 字段就够了（isc-dhcp、dnsmasq、MAAS 的 UEFI 分支
+  都是这个行为）。引导文件名要同时写进 BOOTP 的 `file` 字段，部分固件
+  不看 option 67。
 - **Windows 上绑 `0.0.0.0` 会跨网卡应答**（见上）。
+
+上面两条都是拿 VMware Workstation 的 UEFI PXE 固件实测出来的，验证到
+固件从 lessor 拿到地址 → TFTP 拉 `bootx64.efi` → shim 拉 `grubx64.efi` →
+GRUB 起来为止。三种客户端（busybox udhcpc、systemd-networkd、UEFI PXE 固件）
+里，只有固件能暴露这两条。
 
 ### lessord 已具备
 
-- 每个监听器一对 socket：收绑 `0.0.0.0:67`，**发绑本机地址** ——
-  广播应答只从对应网卡出去，不会打扰别的网段
+- 每个监听器**一个**收发共用的 socket，绑在服务端口上 —— 应答的源端口
+  因此是 67（PXE 固件的硬性要求），广播也只从对应网卡出去
 - Linux 上用 `SO_BINDTODEVICE` 把 socket 钉在网卡上，多网卡才真正干净；
   其它平台上配多个监听器时会给出告警
 - WebSocket 推送每个报文的处理结果（含丢弃原因），慢客户端只丢事件、

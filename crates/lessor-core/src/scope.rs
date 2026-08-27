@@ -136,6 +136,18 @@ impl Scope {
         }
     }
 
+    /// 这个作用域有没有配 PXE 厂商选项（option 43）。
+    ///
+    /// 决定应答里要不要声明 option 60 = "PXEClient"。只声明不给 43 的话，
+    /// 固件会去找根本不存在的引导服务器列表，然后什么都不做 ——
+    /// 详见 `server.rs` 里填充 option 60 那段的实测对照表。
+    pub fn has_pxe_vendor_options(&self) -> bool {
+        const VENDOR_SPECIFIC: u8 = 43;
+        self.extra_options
+            .iter()
+            .any(|(code, value)| *code == VENDOR_SPECIFIC && !value.is_empty())
+    }
+
     pub fn netmask(&self) -> Ipv4Addr {
         let bits = if self.prefix >= 32 {
             u32::MAX

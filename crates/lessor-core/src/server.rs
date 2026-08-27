@@ -252,11 +252,27 @@ fn apply_scope_options(msg: &mut Message, req: &Message, scope: &Scope, lease_se
             msg.set_siaddr(ns);
         }
 
-        // PXE 客户端要求应答里带 option 60 = "PXEClient"，以此确认
-        // "这台服务器能提供网络引导"。不回这个，固件会直接丢弃我们的
-        // OFFER 继续广播 DISCOVER —— 表现为一直起不来，但日志上看
-        // 服务端明明应答了。
-        if is_pxe_client(req) {
+        // option 60 = "PXEClient" 只在同时给了 PXE 厂商选项（option 43）时才回。
+        //
+        // 应答里出现 "PXEClient" 是在声明"我提供 PXE 引导服务"，固件据此
+        // 转去 option 43 里找引导服务器列表 / 菜单。只声明却不给 43，固件
+        // 会认为这是个残缺的 PXE 服务：它接受地址，却不去 TFTP 拉引导文件。
+        //
+        // 拿 VMware UEFI 固件实测的三组对照：
+        //
+        // | option 60 | option 43 | 结果                    |
+        // |-----------|-----------|-------------------------|
+        // | 无        | 无        | 正常引导到 GRUB         |
+        // | 有        | 有        | 正常引导                |
+        // | 有        | 无        | 拿到 ACK 后什么都不做   |
+        //
+        // 不做 PXE 菜单时，siaddr + BOOTP file 字段就够固件直接去拉引导
+        // 文件了。isc-dhcp 和 dnsmasq 默认也是这个行为 —— MAAS 生成的
+        // dhcpd.conf 里，UEFI（arch 00:07）那一支同样只给 filename。
+        //
+        // 另：别把"固件完全不接受 OFFER、一直重发 DISCOVER"算到这一项头上，
+        // 那个症状的原因是应答的**源端口**不是 67，见 lessord 的 `socket_for`。
+        if is_pxe_client(req) && scope.has_pxe_vendor_options() {
             msg.opts_mut()
                 .insert(DhcpOption::ClassIdentifier(b"PXEClient".to_vec()));
         }

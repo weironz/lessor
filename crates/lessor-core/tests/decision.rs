@@ -563,20 +563,57 @@ fn pxe_req(kind: MessageType, client: u8) -> Message {
     m
 }
 
+/// PXE 厂商选项（option 43），值取自 PXE 规范的 PXE_DISCOVERY_CONTROL：
+/// `06 01 08` = 跳过引导服务器发现，直接用报文里的 filename。
+const PXE_DISCOVERY_CONTROL: [u8; 4] = [0x06, 0x01, 0x08, 0xff];
+
 #[test]
-fn pxe_offer_echoes_option_60() {
-    // PXE 固件要在应答里看到 option 60 = "PXEClient" 才承认这是一台
-    // 能提供网络引导的服务器。不回这个，它会丢弃 OFFER 一直重发
-    // DISCOVER —— 现象是机器起不来，但服务端日志显示"已应答"。
-    let c = ServerConfig::new(vec![pxe_scope()]);
+fn pxe_offer_echoes_option_60_only_with_vendor_options() {
+    // 声明 "PXEClient" 等于告诉固件"我提供 PXE 引导服务"，固件随即去
+    // option 43 里找引导服务器列表。只声明不给 43，实测 VMware 的 UEFI
+    // 固件会接受地址却不去 TFTP —— 机器停在那里，日志上一切正常。
+    //
+    // 不做 PXE 菜单时正确的做法是压根别声明：siaddr + BOOTP file 就够了。
     let mut t = MemoryStore::new();
 
+    let c = ServerConfig::new(vec![pxe_scope()]);
     let out = handle(&c, &mut t, &pxe_req(MessageType::Discover, 1), ctx(0));
     let r = out.reply().expect("应当回 OFFER");
     assert_eq!(
         r.msg.opts().get(OptionCode::ClassIdentifier),
-        Some(&DhcpOption::ClassIdentifier(b"PXEClient".to_vec())),
+        None,
+        "没配 option 43 就不该声明 PXEClient"
     );
+
+    let mut scope = pxe_scope();
+    scope
+        .extra_options
+        .push((43, PXE_DISCOVERY_CONTROL.to_vec()));
+    let c = ServerConfig::new(vec![scope]);
+    let mut t = MemoryStore::new();
+    let out = handle(&c, &mut t, &pxe_req(MessageType::Discover, 2), ctx(0));
+    let r = out.reply().expect("应当回 OFFER");
+    assert_eq!(
+        r.msg.opts().get(OptionCode::ClassIdentifier),
+        Some(&DhcpOption::ClassIdentifier(b"PXEClient".to_vec())),
+        "配了 option 43 就该声明 PXEClient"
+    );
+}
+
+#[test]
+fn non_pxe_clients_never_get_option_60() {
+    // 普通客户端没发 option 60，就算作用域配了 PXE 厂商选项也不该收到 ——
+    // 回一个它看不懂的厂商类别没有意义。
+    let mut scope = pxe_scope();
+    scope
+        .extra_options
+        .push((43, PXE_DISCOVERY_CONTROL.to_vec()));
+    let c = ServerConfig::new(vec![scope]);
+    let mut t = MemoryStore::new();
+
+    let out = handle(&c, &mut t, &req(MessageType::Discover, 3), ctx(0));
+    let r = out.reply().expect("应当回 OFFER");
+    assert_eq!(r.msg.opts().get(OptionCode::ClassIdentifier), None);
 }
 
 #[test]
