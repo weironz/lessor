@@ -1,0 +1,16 @@
+[package]
+name = "lessor-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "DHCPv4 服务端核心逻辑：地址池、租约状态机、报文决策。无 IO、无 async。"
+
+[dependencies]
+dhcproto.workspace = true
+serde = { workspace = true }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+dhcproto.workspace = true
