@@ -35,9 +35,14 @@
 - [x] Web UI —— Svelte + Vite，打包进二进制
 - [x] 桌面端 —— Tauri 套同一份 UI
 
-共 120 个测试。已用三种真实客户端验证过：busybox `udhcpc`（docker）、
-`systemd-networkd`（Ubuntu 24.04）、VMware 的 UEFI PXE 固件 ——
-最后一种一路验到 shim → GRUB 起来。
+共 129 个测试。已用四种真实客户端验证过：
+
+| 客户端 | 验到哪一步 |
+| --- | --- |
+| busybox `udhcpc`（docker） | 完整握手，Linux 的 `SO_BINDTODEVICE` 隔离路径 |
+| `systemd-networkd`（Ubuntu 24.04） | 完整握手，暴露了 DUID 形式的 option 61 |
+| VMware UEFI PXE 固件 | DHCP → TFTP → shim → GRUB 提示符 |
+| iPXE 2.0.0+ | 链式引导：固件拉 `ipxe.efi` → iPXE 取到 HTTP 上的脚本并执行 |
 
 ### 不需要特权
 
@@ -229,7 +234,7 @@ ui/src-tauri/    桌面外壳。纯客户端，零特权 —— 加载的就是 
 ## 开发
 
 ```bash
-cargo test        # 120 个测试
+cargo test        # 129 个测试
 cargo clippy --all-targets
 ```
 

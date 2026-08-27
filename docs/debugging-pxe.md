@@ -107,6 +107,46 @@ RRQ 192.168.88.50 -> /grub/grub.cfg
 `bootx64.efi` 是 shim，它会接着去要 `grubx64.efi`，然后 GRUB 找自己的配置。
 到 GRUB 提示符就说明 DHCP 这一侧再没有可挑剔的了。
 
+## 验证 iPXE 链式引导
+
+这条链比 PXE 长一环，也更容易配错（配错的典型结果是无限自举）。
+搭一遍只需要三个进程：
+
+```bash
+# 1. 取官方构建（注意路径按架构分目录，不是根目录）
+curl -o tftproot/ipxe.efi https://boot.ipxe.org/x86_64-efi/ipxe.efi
+
+# 2. 一个 iPXE 脚本，放在 HTTP 上
+printf '#!ipxe\necho LESSOR-OK filename=${filename} ip=${net0/ip}\nsleep 90\n' \
+    > httproot/boot.ipxe
+python -m http.server 80 --bind 192.168.233.1 &
+python scripts/tftpd.py ./tftproot 192.168.233.1 &
+
+# 3. 固件拿 ipxe.efi，iPXE 拿脚本
+lessord --listen 192.168.233.1 --prefix 24 \
+        --pool 192.168.233.50-192.168.233.60 \
+        --next-server 192.168.233.1 \
+        --boot-file ipxe.efi \
+        --ipxe-url  http://192.168.233.1/boot.ipxe
+```
+
+跑通的样子：lessord 日志里出现**两轮** DISCOVER/ACK（先固件后 iPXE），
+TFTP 日志里有 `ipxe.efi`，HTTP 日志里有 `GET /boot.ipxe 200`，
+虚拟机屏幕上 iPXE 打出 `Filename: http://.../boot.ipxe`。
+
+如果屏幕上显示的是 `Filename: ipxe.efi`，那就是自举了 —— 说明 option 77
+没被识别，检查 `--ipxe-url` 配没配。
+
+写脚本时注意两点：
+
+- **必须是 LF**。CRLF 的话 `#!ipxe` 匹配不上，iPXE 直接拒绝执行。
+- **一条命令失败，整个脚本就中断退出**，屏幕一闪而过回到启动菜单。
+  排查时先用最简的 ASCII 脚本（一行 `echo` 加一个 `sleep`）确认链路，
+  再往里加内容。带中文的脚本在这次实测里就没跑起来。
+
+`sleep` 是为了让画面停住够久，好用 `vm_console.py` 抓下来 ——
+不然脚本执行完 iPXE 就退出了，截图只能拍到启动菜单。
+
 ## 几个把人带偏的坑
 
 **同一个端口上跑了两个服务器。** `SO_REUSEADDR` 会让第二个也绑上去，
@@ -140,6 +180,6 @@ sed 's/\x1b\[[0-9;]*m//g'
 - Windows 11，lessord **普通权限**跑在 67 端口
 - VMware Workstation，UEFI 固件 + vmxnet3 网卡，VMnet1（192.168.233.0/24）
 - VMware 自带的 DHCP（`VMnetDHCP` 服务）已停，避免抢答
-- 三种客户端：busybox `udhcpc`（docker）、`systemd-networkd`（Ubuntu 24.04）、
-  VMware UEFI PXE 固件
-- 终点：GNU GRUB 2.06 提示符
+- 四种客户端：busybox `udhcpc`（docker）、`systemd-networkd`（Ubuntu 24.04）、
+  VMware UEFI PXE 固件、iPXE 2.0.0+（官方 x86_64-efi 构建）
+- 终点：GNU GRUB 2.06 提示符 / iPXE 执行到 HTTP 上的脚本

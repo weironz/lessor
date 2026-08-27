@@ -17,16 +17,22 @@ lessor 从 **option 60（vendor class）** 和 **option 77（user class）**
   不该发给普通客户端
 - **界面上认得出这是什么设备** —— 租约表里的"设备类型"列直接显示这个字符串
 
-## 实测：三种客户端发的 option 60
+## 实测：真实客户端发的是什么
 
-| 客户端 | option 60 |
-| --- | --- |
-| VMware UEFI PXE 固件 | `PXEClient:Arch:00007:UNDI:003000` |
-| busybox `udhcpc` 1.37 | `udhcp 1.37.0` |
-| `systemd-networkd`（Ubuntu 24.04） | **不发** |
+| 客户端 | option 60 | option 77 |
+| --- | --- | --- |
+| VMware UEFI PXE 固件 | `PXEClient:Arch:00007:UNDI:003000` | 不发 |
+| iPXE 2.0.0+（x86_64-efi） | `PXEClient:Arch:00007:UNDI:003010` | **`iPXE`**（4 字节裸串） |
+| busybox `udhcpc` 1.37 | `udhcp 1.37.0` | 不发 |
+| `systemd-networkd`（Ubuntu 24.04） | **不发** | 不发 |
 
-也就是说，只有固件会自报家门。操作系统起来之后通常什么都不发 ——
-这正好让"这台机器现在处在哪个阶段"变得可判断。
+两点值得注意：
+
+- **只有固件会自报家门。** 操作系统起来之后通常什么都不发 ——
+  这正好让"这台机器现在处在哪个阶段"变得可判断。
+- **iPXE 的 option 60 和裸固件几乎一样**，只有 UNDI 版本差一位
+  （`003010` vs `003000`）。指望靠 option 60 把它们分开是不行的，
+  必须看 option 77。
 
 ## 同一台机器的两副面孔
 
@@ -139,7 +145,9 @@ option 77 = iPXE                                ← 它自己
 option 77。
 
 option 77 的线上格式有两种：RFC 3004 规定是"长度前缀串"的列表，
-而 iPXE 直接发裸字符串。两种都认。
+而 iPXE 直接发裸字符串。实测 iPXE 2.0.0+ 发的是 `69 50 58 45`
+（4 字节 `iPXE`，无长度前缀），但经过某些中继会被重新封装成前缀形式，
+所以两种都认。
 
 ## 该给谁发什么
 
@@ -185,8 +193,9 @@ iPXE 的 URL 经常更长。
 
 - **PXE**：拿 VMware Workstation 的真 UEFI 固件打通全程（DHCP → TFTP →
   shim → GRUB），见 [debugging-pxe.md](debugging-pxe.md)
-- **HTTP Boot / iPXE**：**没有真固件验过**。VMware Workstation 的 EFI
-  没有 HTTP Boot 启动项，手头也没有 iPXE 二进制。验的是单元测试加
+- **iPXE**：拿真的 iPXE 2.0.0+ 打通全程，见下面一节
+- **HTTP Boot**：**没有真固件验过** —— VMware Workstation 的 EFI 没有
+  HTTP Boot 启动项。只有单元测试加
   [`scripts/boot_matrix.py`](../scripts/boot_matrix.py) —— 后者走真实
   UDP socket，构造真的 option 60 / option 77 组合，检查应答里的实际字节：
 
@@ -198,9 +207,35 @@ iPXE 的 URL 经常更长。
   ✓ iPXE（长度前缀）    option67=http://.../boot.ipxe           option60=—
   ```
 
-  识别逻辑完全由请求内容决定，这一层是测到位的；没测到的是"真固件会不会
-  接受这样的应答"——[源端口那条](pxe-source-port.md)就是这么漏掉的，
-  所以这里如实说明。
+  识别逻辑完全由请求内容决定，这一层是测到位的；HTTP Boot 没测到的是
+  "真固件会不会接受这样的应答"——[源端口那条](pxe-source-port.md)
+  就是这么漏掉的，所以如实说明。
+
+### iPXE 链式引导实测
+
+固件 TFTP 拉 `ipxe.efi`（官方 x86_64-efi 构建，1159680 字节）→ iPXE 起来
+自己再问一次 DHCP → 拿到脚本 URL → HTTP 取走执行。lessord 这边看到两轮：
+
+```
+已应答 client=00:0c:29:78:c4:fa request=DISCOVER reply=OFFER ip=192.168.233.50   ← 固件
+已应答 client=00:0c:29:78:c4:fa request=REQUEST  reply=ACK   ip=192.168.233.50
+已应答 client=00:0c:29:78:c4:fa request=DISCOVER reply=OFFER ip=192.168.233.50   ← iPXE
+已应答 client=00:0c:29:78:c4:fa request=REQUEST  reply=ACK   ip=192.168.233.50
+```
+
+iPXE 自己的输出证明它拿到的是脚本而不是自己：
+
+```
+net0: 00:0c:29:78:c4:fa using vmxnet3 on 0000:0b:00.0 (Ethernet) [open]
+Configuring (net0 00:0c:29:78:c4:fa)...... ok
+net0: 192.168.233.50/255.255.255.0 gw 192.168.233.1
+Next server: 192.168.233.1
+Filename: http://192.168.233.1/boot.ipxe        ← 不是 ipxe.efi，没有自举
+http://192.168.233.1/boot.ipxe... ok
+boot.ipxe : 91 bytes [script]
+```
+
+复现步骤见 [debugging-pxe.md](debugging-pxe.md#验证-ipxe-链式引导)。
 
 ## 还没做的
 
