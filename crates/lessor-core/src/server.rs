@@ -1,17 +1,17 @@
 //! 报文决策 —— 收到一个 DHCP 请求，决定回什么。
 //!
 //! 这里是整个服务端的大脑，实现 RFC 2131 §4.3。函数是纯的：
-//! 输入报文 + 当前租约表 + 时间，输出应答（或"不回"），副作用只有对租约表的修改。
+//! 输入报文 + 当前租约 + 时间，输出应答（或"不回"），副作用只有对存储的修改。
 //! 没有 socket、没有时钟、没有日志 IO —— 因此每条规则都能单独测试。
 
 use std::net::Ipv4Addr;
 
-use dhcproto::v4::{DhcpOption, Message, MessageType, OptionCode, Opcode};
+use dhcproto::v4::{DhcpOption, Message, MessageType, Opcode, OptionCode};
 
 use crate::addr::{ClientId, MacAddr};
 use crate::lease::{Lease, LeaseState, UnixTime};
-use crate::scope::Scope;
-use crate::table::{AllocSource, LeaseTable, allocate};
+use crate::scope::{Scope, ScopeId};
+use crate::store::{AllocSource, LeaseStore, allocate};
 
 /// 应答该发到哪里。RFC 2131 §4.1 规定了这套优先级。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -31,46 +31,120 @@ pub enum ReplyDest {
 pub struct Reply {
     pub msg: Message,
     pub dest: ReplyDest,
+    /// 由哪个作用域产生 —— 上层记日志和统计要用。
+    pub scope_id: ScopeId,
+    /// 地址是怎么选出来的。NAK 和 INFORM 没有分配动作，故为 None。
+    pub alloc_source: Option<AllocSource>,
 }
 
-/// 一次处理的结果，便于上层记录发生了什么。
+/// 为什么没有应答。界面上"这台机器插上了却没反应"时，这是第一手线索。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DropReason {
+    /// opcode 不是 BootRequest —— 可能是别的服务器的应答被我们收到了
+    NotBootRequest,
+    /// 缺 option 53，不是合法的 DHCP 报文
+    NoMessageType,
+    /// 服务端不处理的报文类型（OFFER / ACK / NAK 等）
+    UnsupportedType,
+    /// chaddr 全零且没有 option 61 —— 无法标识这个客户端
+    UnidentifiableClient,
+    /// 收包的网段（或中继地址）没有匹配的作用域
+    NoMatchingScope,
+    /// 匹配到的作用域被禁用了
+    ScopeDisabled,
+    /// 地址池耗尽。按 RFC 应当沉默，让客户端去问别的服务器
+    PoolExhausted,
+    /// 客户端在多个 OFFER 里选了别人
+    ChoseAnotherServer,
+    /// DECLINE 缺少 option 50，不知道该隔离哪个地址
+    DeclineWithoutAddress,
+    /// RELEASE 缺少 ciaddr
+    ReleaseWithoutAddress,
+    /// RELEASE 的地址不属于该客户端 —— 可能是伪造报文
+    ReleaseNotOwned,
+}
+
+/// 一次处理的结果。
 #[derive(Clone, Debug)]
-pub struct Outcome {
-    pub reply: Option<Reply>,
-    pub note: &'static str,
+pub enum Outcome {
+    /// 要发出的应答
+    Reply(Reply),
+    /// 按协议处理了，但不需要回应（DECLINE / RELEASE）
+    Handled(&'static str),
+    /// 没有处理
+    Drop(DropReason),
 }
 
 impl Outcome {
-    fn silent(note: &'static str) -> Self {
-        Self { reply: None, note }
+    pub fn reply(&self) -> Option<&Reply> {
+        match self {
+            Self::Reply(r) => Some(r),
+            _ => None,
+        }
     }
 
-    fn with(reply: Reply, note: &'static str) -> Self {
-        Self {
-            reply: Some(reply),
-            note,
+    pub fn drop_reason(&self) -> Option<DropReason> {
+        match self {
+            Self::Drop(r) => Some(*r),
+            _ => None,
         }
     }
 }
 
+/// 收包上下文。时间和收包网卡的地址都由调用方注入。
+#[derive(Clone, Copy, Debug)]
+pub struct RecvCtx {
+    pub now: UnixTime,
+    /// 收到该报文的那块网卡上的本机地址。
+    /// 既用来选作用域（非中继场景），也用作 option 54（server identifier）。
+    pub server_ip: Ipv4Addr,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct ServerConfig {
-    /// 本服务端在该网卡上的地址，用作 option 54（server identifier）
-    pub server_id: Ipv4Addr,
-    pub scope: Scope,
+    pub scopes: Vec<Scope>,
+}
+
+impl ServerConfig {
+    pub fn new(scopes: Vec<Scope>) -> Self {
+        Self { scopes }
+    }
+
+    pub fn scope(&self, id: ScopeId) -> Option<&Scope> {
+        self.scopes.iter().find(|s| s.id == id)
+    }
+
+    /// 选出该请求归属的作用域。
+    ///
+    /// 经中继来的报文用 `giaddr` 判断 —— 那是客户端所在网段的网关地址；
+    /// 直连的用收包网卡的本机地址。
+    pub fn select_scope(&self, req: &Message, ctx: &RecvCtx) -> Result<&Scope, DropReason> {
+        let key = if req.giaddr().is_unspecified() {
+            ctx.server_ip
+        } else {
+            req.giaddr()
+        };
+        let matched: Vec<&Scope> = self.scopes.iter().filter(|s| s.contains(key)).collect();
+        match matched.iter().find(|s| s.enabled) {
+            Some(s) => Ok(s),
+            None if matched.is_empty() => Err(DropReason::NoMatchingScope),
+            None => Err(DropReason::ScopeDisabled),
+        }
+    }
 }
 
 /// 取客户端标识：有 option 61 就用它，否则回退到 chaddr（RFC 2131 §4.2）。
-pub fn client_id_of(msg: &Message) -> ClientId {
-    if let Some(DhcpOption::ClientIdentifier(raw)) = msg.opts().get(OptionCode::ClientIdentifier)
-        && !raw.is_empty()
-    {
-        return ClientId::Opt61(raw.clone());
+pub fn client_id_of(msg: &Message) -> Option<ClientId> {
+    let opt61 = match msg.opts().get(OptionCode::ClientIdentifier) {
+        Some(DhcpOption::ClientIdentifier(raw)) if !raw.is_empty() => Some(raw.as_slice()),
+        _ => None,
+    };
+    let mac = MacAddr::from_slice(msg.chaddr()).unwrap_or(MacAddr::ZERO);
+    // 既没有 option 61 又没有有效 MAC，无法索引租约
+    if opt61.is_none() && mac.is_zero() {
+        return None;
     }
-    match MacAddr::from_slice(msg.chaddr()) {
-        Some(mac) => ClientId::Mac(mac),
-        // chaddr 不足 6 字节（非以太网），只能拿原始字节当标识
-        None => ClientId::Opt61(msg.chaddr().to_vec()),
-    }
+    Some(ClientId::from_parts(opt61, mac))
 }
 
 fn requested_ip(msg: &Message) -> Option<Ipv4Addr> {
@@ -90,6 +164,17 @@ fn server_ident(msg: &Message) -> Option<Ipv4Addr> {
 fn hostname(msg: &Message) -> Option<String> {
     match msg.opts().get(OptionCode::Hostname) {
         Some(DhcpOption::Hostname(h)) if !h.is_empty() => Some(h.clone()),
+        _ => None,
+    }
+}
+
+/// option 60。PXE 客户端会填 `PXEClient:Arch:00007:...`，
+/// 据此可以区分固件阶段和操作系统阶段，也便于在界面上认出设备类型。
+fn vendor_class(msg: &Message) -> Option<String> {
+    match msg.opts().get(OptionCode::ClassIdentifier) {
+        Some(DhcpOption::ClassIdentifier(raw)) if !raw.is_empty() => {
+            Some(String::from_utf8_lossy(raw).into_owned())
+        }
         _ => None,
     }
 }
@@ -124,13 +209,12 @@ fn base_reply(req: &Message, kind: MessageType, server_id: Ipv4Addr) -> Message 
         .set_giaddr(req.giaddr())
         .set_chaddr(req.chaddr());
     m.opts_mut().insert(DhcpOption::MessageType(kind));
-    m.opts_mut()
-        .insert(DhcpOption::ServerIdentifier(server_id));
+    m.opts_mut().insert(DhcpOption::ServerIdentifier(server_id));
     m
 }
 
-/// 按作用域配置填入网络参数。只填客户端问了的（PRL），外加几个必发的。
-fn apply_scope_options(msg: &mut Message, req: &Message, scope: &Scope, lease_secs: u32) {
+/// 按作用域配置填入网络参数。
+fn apply_scope_options(msg: &mut Message, scope: &Scope, lease_secs: u32) {
     let opts = msg.opts_mut();
     opts.insert(DhcpOption::AddressLeaseTime(lease_secs));
     // T1/T2 —— 不发的话客户端会自己按 0.5/0.875 推算，显式给出更可控
@@ -150,10 +234,12 @@ fn apply_scope_options(msg: &mut Message, req: &Message, scope: &Scope, lease_se
 
     if let Some(boot) = &scope.boot {
         if let Some(f) = &boot.filename {
-            opts.insert(DhcpOption::BootfileName(f.clone().into_bytes()));
+            msg.opts_mut()
+                .insert(DhcpOption::BootfileName(f.clone().into_bytes()));
         }
         if let Some(sn) = &boot.server_name {
-            opts.insert(DhcpOption::TFTPServerName(sn.clone().into_bytes()));
+            msg.opts_mut()
+                .insert(DhcpOption::TFTPServerName(sn.clone().into_bytes()));
         }
         if let Some(ns) = boot.next_server {
             msg.set_siaddr(ns);
@@ -168,220 +254,239 @@ fn apply_scope_options(msg: &mut Message, req: &Message, scope: &Scope, lease_se
                 value.clone(),
             )));
     }
-
-    let _ = req; // PRL 过滤留待后续按需实现，先全发
 }
 
-/// 处理一个请求。会就地更新租约表。
-pub fn handle(
+/// 处理一个请求。会就地更新租约存储。
+pub fn handle<S: LeaseStore + ?Sized>(
     cfg: &ServerConfig,
-    table: &mut LeaseTable,
+    store: &mut S,
     req: &Message,
-    now: UnixTime,
+    ctx: RecvCtx,
 ) -> Outcome {
     if req.opcode() != Opcode::BootRequest {
-        return Outcome::silent("不是 BootRequest，忽略");
+        return Outcome::Drop(DropReason::NotBootRequest);
     }
     let Some(kind) = req.opts().msg_type() else {
-        return Outcome::silent("没有 option 53，不是合法的 DHCP 报文");
+        return Outcome::Drop(DropReason::NoMessageType);
+    };
+    let Some(client) = client_id_of(req) else {
+        return Outcome::Drop(DropReason::UnidentifiableClient);
+    };
+    let scope = match cfg.select_scope(req, &ctx) {
+        Ok(s) => s,
+        Err(why) => return Outcome::Drop(why),
     };
 
     match kind {
-        MessageType::Discover => on_discover(cfg, table, req, now),
-        MessageType::Request => on_request(cfg, table, req, now),
-        MessageType::Decline => on_decline(cfg, table, req, now),
-        MessageType::Release => on_release(cfg, table, req, now),
-        MessageType::Inform => on_inform(cfg, req),
-        _ => Outcome::silent("服务端不处理的报文类型"),
+        MessageType::Discover => on_discover(scope, store, req, &client, ctx),
+        MessageType::Request => on_request(scope, store, req, &client, ctx),
+        MessageType::Decline => on_decline(scope, store, req, &client, ctx),
+        MessageType::Release => on_release(scope, store, req, &client),
+        MessageType::Inform => on_inform(scope, req, ctx),
+        _ => Outcome::Drop(DropReason::UnsupportedType),
     }
 }
 
-fn on_discover(
-    cfg: &ServerConfig,
-    table: &mut LeaseTable,
+fn on_discover<S: LeaseStore + ?Sized>(
+    scope: &Scope,
+    store: &mut S,
     req: &Message,
-    now: UnixTime,
+    client: &ClientId,
+    ctx: RecvCtx,
 ) -> Outcome {
-    let client = client_id_of(req);
-    let Some(alloc) = allocate(&cfg.scope, table, &client, requested_ip(req), now) else {
-        // 池子满了。不回 NAK —— DISCOVER 阶段沉默是 RFC 的要求，
-        // 让客户端去问别的服务器。
-        return Outcome::silent("地址池已耗尽");
+    let Some(alloc) = allocate(scope, store, client, requested_ip(req), ctx.now) else {
+        return Outcome::Drop(DropReason::PoolExhausted);
     };
 
-    let lease_secs = requested_lease_secs(req, &cfg.scope);
+    let lease_secs = requested_lease_secs(req, scope);
 
     // 用短超时占位，防止并发的 DISCOVER 拿到同一个地址。
     // 客户端不跟进 REQUEST 的话，很快就会被回收。
-    table.insert(Lease {
+    store.insert(Lease {
         ip: alloc.ip,
-        client,
+        client: client.clone(),
+        scope_id: scope.id,
         state: LeaseState::Offered,
-        expires_at: now + u64::from(cfg.scope.offer_secs),
+        expires_at: ctx.now + u64::from(scope.offer_secs),
         hostname: hostname(req),
-        created_at: now,
+        vendor_class: vendor_class(req),
+        created_at: ctx.now,
+        last_seen: ctx.now,
     });
 
-    let mut msg = base_reply(req, MessageType::Offer, cfg.server_id);
+    let mut msg = base_reply(req, MessageType::Offer, ctx.server_ip);
     msg.set_yiaddr(alloc.ip);
-    apply_scope_options(&mut msg, req, &cfg.scope, lease_secs);
+    apply_scope_options(&mut msg, scope, lease_secs);
 
-    Outcome::with(
-        Reply {
-            msg,
-            dest: dest_for(req, alloc.ip),
-        },
-        match alloc.source {
-            AllocSource::Reservation => "OFFER（静态保留）",
-            AllocSource::Existing => "OFFER（沿用原地址）",
-            AllocSource::Requested => "OFFER（满足请求地址）",
-            AllocSource::Pool => "OFFER（池分配）",
-        },
-    )
+    Outcome::Reply(Reply {
+        msg,
+        dest: dest_for(req, alloc.ip),
+        scope_id: scope.id,
+        alloc_source: Some(alloc.source),
+    })
 }
 
-fn nak(cfg: &ServerConfig, req: &Message, why: &'static str) -> Outcome {
-    let mut msg = base_reply(req, MessageType::Nak, cfg.server_id);
+fn nak(scope_id: ScopeId, req: &Message, server_ip: Ipv4Addr, why: &str) -> Outcome {
+    let mut msg = base_reply(req, MessageType::Nak, server_ip);
     msg.set_yiaddr(Ipv4Addr::UNSPECIFIED);
-    msg.opts_mut()
-        .insert(DhcpOption::Message(why.to_string()));
+    msg.opts_mut().insert(DhcpOption::Message(why.to_string()));
     // NAK 必须广播 —— 客户端此刻的地址是错的，单播到不了
     let dest = if req.giaddr().is_unspecified() {
         ReplyDest::Broadcast
     } else {
         ReplyDest::Relay(req.giaddr())
     };
-    Outcome::with(Reply { msg, dest }, "NAK")
+    Outcome::Reply(Reply {
+        msg,
+        dest,
+        scope_id,
+        alloc_source: None,
+    })
 }
 
-fn on_request(
-    cfg: &ServerConfig,
-    table: &mut LeaseTable,
+fn on_request<S: LeaseStore + ?Sized>(
+    scope: &Scope,
+    store: &mut S,
     req: &Message,
-    now: UnixTime,
+    client: &ClientId,
+    ctx: RecvCtx,
 ) -> Outcome {
-    let client = client_id_of(req);
-    let requested = requested_ip(req);
-    let sid = server_ident(req);
-
     // SELECTING：客户端在多个 OFFER 里选了一个。不是选我们就闭嘴，
     // 同时把我们之前的 OFFER 占位释放掉。
-    if let Some(chosen) = sid
-        && chosen != cfg.server_id
+    if let Some(chosen) = server_ident(req)
+        && chosen != ctx.server_ip
     {
-        if let Some(l) = table.get_by_client(&client)
+        if let Some(l) = store.get_by_client(scope.id, client)
             && l.state == LeaseState::Offered
         {
             let ip = l.ip;
-            table.remove_ip(ip);
+            store.remove(scope.id, ip);
         }
-        return Outcome::silent("客户端选了别的服务器");
+        return Outcome::Drop(DropReason::ChoseAnotherServer);
     }
 
     // 客户端认为自己该拿的地址：
     // SELECTING / INIT-REBOOT 放在 option 50，RENEWING / REBINDING 放在 ciaddr。
-    let claimed = requested.or_else(|| {
+    let claimed = requested_ip(req).or_else(|| {
         (!req.ciaddr().is_unspecified()).then(|| req.ciaddr())
     });
     let Some(claimed) = claimed else {
-        return nak(cfg, req, "REQUEST 里既没有 option 50 也没有 ciaddr");
+        return nak(
+            scope.id,
+            req,
+            ctx.server_ip,
+            "REQUEST 里既没有 option 50 也没有 ciaddr",
+        );
     };
 
-    if !cfg.scope.contains(claimed) {
+    if !scope.contains(claimed) {
         // 客户端换网段了（比如笔记本从别的办公室回来），必须 NAK 让它重来
-        return nak(cfg, req, "请求的地址不属于本子网");
+        return nak(scope.id, req, ctx.server_ip, "请求的地址不属于本子网");
     }
 
-    let Some(alloc) = allocate(&cfg.scope, table, &client, Some(claimed), now) else {
-        return nak(cfg, req, "无可用地址");
+    let Some(alloc) = allocate(scope, store, client, Some(claimed), ctx.now) else {
+        return nak(scope.id, req, ctx.server_ip, "无可用地址");
     };
     if alloc.ip != claimed {
         // 我们能给的和它要的不是同一个 —— 地址被别人占了，或者管理员改了保留
-        return nak(cfg, req, "该地址已不属于此客户端");
+        return nak(scope.id, req, ctx.server_ip, "该地址已不属于此客户端");
     }
 
-    let lease_secs = requested_lease_secs(req, &cfg.scope);
-    table.insert(Lease {
+    let lease_secs = requested_lease_secs(req, scope);
+    let created_at = store
+        .get_by_client(scope.id, client)
+        .map_or(ctx.now, |l| l.created_at);
+
+    store.insert(Lease {
         ip: alloc.ip,
-        client,
+        client: client.clone(),
+        scope_id: scope.id,
         state: LeaseState::Bound,
-        expires_at: now + u64::from(lease_secs),
+        expires_at: ctx.now + u64::from(lease_secs),
         hostname: hostname(req),
-        created_at: now,
+        vendor_class: vendor_class(req),
+        created_at,
+        last_seen: ctx.now,
     });
 
-    let mut msg = base_reply(req, MessageType::Ack, cfg.server_id);
+    let mut msg = base_reply(req, MessageType::Ack, ctx.server_ip);
     msg.set_yiaddr(alloc.ip).set_ciaddr(req.ciaddr());
-    apply_scope_options(&mut msg, req, &cfg.scope, lease_secs);
+    apply_scope_options(&mut msg, scope, lease_secs);
 
-    Outcome::with(
-        Reply {
-            msg,
-            dest: dest_for(req, alloc.ip),
-        },
-        "ACK",
-    )
+    Outcome::Reply(Reply {
+        msg,
+        dest: dest_for(req, alloc.ip),
+        scope_id: scope.id,
+        alloc_source: Some(alloc.source),
+    })
 }
 
-fn on_decline(
-    cfg: &ServerConfig,
-    table: &mut LeaseTable,
+fn on_decline<S: LeaseStore + ?Sized>(
+    scope: &Scope,
+    store: &mut S,
     req: &Message,
-    now: UnixTime,
+    client: &ClientId,
+    ctx: RecvCtx,
 ) -> Outcome {
     // 客户端 ARP 探测发现地址已被占用。把它隔离一段时间，别再发出去。
     let Some(bad) = requested_ip(req) else {
-        return Outcome::silent("DECLINE 没带 option 50");
+        return Outcome::Drop(DropReason::DeclineWithoutAddress);
     };
-    let client = client_id_of(req);
-    table.insert(Lease {
+    store.insert(Lease {
         ip: bad,
-        client,
+        client: client.clone(),
+        scope_id: scope.id,
         state: LeaseState::Declined,
-        expires_at: now + u64::from(cfg.scope.decline_quarantine_secs),
+        expires_at: ctx.now + u64::from(scope.decline_quarantine_secs),
         hostname: None,
-        created_at: now,
+        vendor_class: None,
+        created_at: ctx.now,
+        last_seen: ctx.now,
     });
-    Outcome::silent("地址被客户端 DECLINE，已隔离")
+    Outcome::Handled("地址被客户端 DECLINE，已隔离")
 }
 
-fn on_release(
-    _cfg: &ServerConfig,
-    table: &mut LeaseTable,
+fn on_release<S: LeaseStore + ?Sized>(
+    scope: &Scope,
+    store: &mut S,
     req: &Message,
-    _now: UnixTime,
+    client: &ClientId,
 ) -> Outcome {
     // RELEASE 用 ciaddr 指明要归还的地址
     let ip = req.ciaddr();
     if ip.is_unspecified() {
-        return Outcome::silent("RELEASE 没带 ciaddr");
+        return Outcome::Drop(DropReason::ReleaseWithoutAddress);
     }
-    let client = client_id_of(req);
     // 只允许归还自己的租约，避免被伪造报文清掉别人的
-    if let Some(l) = table.get_by_ip(ip)
-        && l.client == client
-    {
-        table.remove_ip(ip);
-        return Outcome::silent("租约已释放");
+    match store.get_by_ip(scope.id, ip) {
+        Some(l) if &l.client == client => {
+            store.remove(scope.id, ip);
+            Outcome::Handled("租约已释放")
+        }
+        _ => Outcome::Drop(DropReason::ReleaseNotOwned),
     }
-    Outcome::silent("RELEASE 的地址不属于该客户端，忽略")
 }
 
-fn on_inform(cfg: &ServerConfig, req: &Message) -> Outcome {
+fn on_inform(scope: &Scope, req: &Message, ctx: RecvCtx) -> Outcome {
     // 客户端自己有地址，只想要网络参数。回 ACK 但不分配、不建租约。
-    let mut msg = base_reply(req, MessageType::Ack, cfg.server_id);
+    let mut msg = base_reply(req, MessageType::Ack, ctx.server_ip);
     msg.set_yiaddr(Ipv4Addr::UNSPECIFIED)
         .set_ciaddr(req.ciaddr());
-    apply_scope_options(&mut msg, req, &cfg.scope, cfg.scope.lease_secs);
+    apply_scope_options(&mut msg, scope, scope.lease_secs);
     // INFORM 的应答不能带租期
     msg.opts_mut().remove(OptionCode::AddressLeaseTime);
     msg.opts_mut().remove(OptionCode::Renewal);
     msg.opts_mut().remove(OptionCode::Rebinding);
 
-    let dest = if !req.ciaddr().is_unspecified() {
-        ReplyDest::Unicast(req.ciaddr())
-    } else {
+    let dest = if req.ciaddr().is_unspecified() {
         ReplyDest::Broadcast
+    } else {
+        ReplyDest::Unicast(req.ciaddr())
     };
-    Outcome::with(Reply { msg, dest }, "ACK（INFORM，不分配地址）")
+    Outcome::Reply(Reply {
+        msg,
+        dest,
+        scope_id: scope.id,
+        alloc_source: None,
+    })
 }

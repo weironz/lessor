@@ -7,10 +7,10 @@ pub mod addr;
 pub mod lease;
 pub mod scope;
 pub mod server;
-pub mod table;
+pub mod store;
 
-pub use addr::{ClientId, MacAddr, Range};
+pub use addr::{ClientId, MacAddr, ParseMacError, Range};
 pub use lease::{Lease, LeaseState, UnixTime};
-pub use scope::{BootConfig, Reservation, Scope};
-pub use server::{Outcome, Reply, ReplyDest, ServerConfig, handle};
-pub use table::{AllocSource, Allocation, LeaseTable, allocate};
+pub use scope::{BootConfig, Reservation, Scope, ScopeError, ScopeId};
+pub use server::{DropReason, Outcome, RecvCtx, Reply, ReplyDest, ServerConfig, handle};
+pub use store::{AllocSource, Allocation, LeaseStore, MemoryStore, allocate};

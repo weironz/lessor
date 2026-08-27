@@ -28,29 +28,31 @@
 
 早期开发中，**还不能用**。
 
-- [x] `lessor-core` —— 地址池、租约状态机、报文决策（44 个测试）
+- [x] `lessor-core` —— 地址池、租约状态机、报文决策（76 个测试）
 - [ ] `lessord` —— tokio UDP 循环 + axum HTTP/WebSocket
 - [ ] `lessor-net` —— 平台层：网卡枚举与地址配置
 - [ ] `discovery` —— 发现已配置静态 IP 的设备
 - [ ] UI —— Svelte + Vite，Tauri 套壳做桌面端
 
-### core 已知的欠缺
+### core 已具备
 
-这几条是"通用 DHCP 服务器"必须补上的，越早改代价越小：
-
-- [ ] **多作用域** —— 目前 `ServerConfig` 只带一个 `Scope`，租约上也没有 scope 标识。
-      多网卡、多子网、按 `giaddr` 选作用域都还做不到
-- [ ] **存储抽象** —— `LeaseTable` 是具体类型，接 sqlite 持久化需要抽成 trait
-- [ ] **`MacAddr` 的 JSON 表示** —— 现在序列化成字节数组，前端不可读，应实现
-      `FromStr` 并序列化为 `"ac:1f:6b:8e:00:01"`
-- [ ] **作用域校验** —— 池是否落在子网内、区间是否重叠、保留地址是否冲突，目前都不检查
-- [ ] **`vendor_class`（选项 60）** —— PXE 客户端分类要用，租约里还没有这个字段
-- [ ] 作用域启用/禁用开关；容量统计（可分配总数 / 已用）
+- **多作用域** —— 直连按收包网卡地址选，经中继按 `giaddr` 选；租约带 `scope_id`，
+  两个隔离网段可以都用 `192.168.1.0/24` 而互不干扰
+- **存储抽象** —— `LeaseStore` trait，`MemoryStore` 是内存实现，sqlite 放上层
+- **配置校验** —— 池越界、区间重叠、保留冲突、网关不在子网内等一次全部列出
+- **丢弃原因** —— 不应答时给出 `DropReason`，界面上能回答"为什么这台机器插上没反应"
+- **`vendor_class`（选项 60）** —— 记录并识别 PXE 客户端
+- 作用域启用/禁用；容量统计；`MacAddr` 序列化为 `"ac:1f:6b:8e:00:01"`
 
 ## 架构
 
 ```
 lessor-core/     纯逻辑，无 IO、无 async、不读时钟 —— 三平台共用
+                   addr    MAC / 客户端标识 / 地址区间
+                   scope   作用域：子网、地址池、保留、选项、校验
+                   lease   租约与状态机
+                   store   LeaseStore trait + 内存实现 + 分配算法
+                   server  RFC 2131 报文决策
 lessor-net/      平台层
                    windows: IP Helper API
                    linux:   rtnetlink + SO_BINDTODEVICE
