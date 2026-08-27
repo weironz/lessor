@@ -24,3 +24,6 @@ __pycache__/
 
 # CI / 本地打镜像时暂存进来的产物
 /docker/lessor-netcfg
+
+# Tauri sidecar（CI 构建时拷入）
+/ui/src-tauri/binaries/

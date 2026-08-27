@@ -138,6 +138,17 @@ jobs:
             .
             ui/src-tauri
 
+      # 桌面端随包自带 lessord（sidecar），装完即可用，不必先手工起服务。
+      # 文件名必须带 target triple —— Tauri 按这个规则找。
+      # 注意顺序：tauri.conf.json 里声明了 externalBin，文件不在的话
+      # 构建脚本直接失败，所以这一步必须排在 tauri build 之前。
+      - name: 准备 sidecar
+        shell: bash
+        run: |
+          cargo build --release -p lessord
+          mkdir -p ui/src-tauri/binaries
+          cp target/release/lessord.exe ui/src-tauri/binaries/lessord-x86_64-pc-windows-msvc.exe
+
       - name: 桌面端安装程序
         working-directory: ui
         run: bunx tauri build --bundles nsis
@@ -146,7 +157,7 @@ jobs:
         shell: bash
         run: |
           v="${GITHUB_REF_NAME#v}"
-          cargo build --release -p lessord -p lessor-net
+          cargo build --release -p lessor-net
           mkdir -p out
           7z a "out/lessor-$v-x86_64-windows.zip" \
             ./target/release/lessord.exe ./target/release/lessor-netcfg.exe
