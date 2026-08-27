@@ -1,0 +1,45 @@
+# 每次推送都跑的检查。发布流水线在 release.yml。
+#
+# 构建顺序是硬性的：ui/dist 是 lessord 的编译期依赖（rust-embed 编译期
+# 就要读它），所以必须先 bun build 再碰任何 cargo 命令 —— 包括 clippy。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # 读 package.json 里的 packageManager 字段，和本机钉的同一个版本
+          bun-version-file: ui/package.json
+
+      - name: 构建前端
+        working-directory: ui
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试
+        run: cargo test --workspace

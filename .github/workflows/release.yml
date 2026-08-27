@@ -1,0 +1,204 @@
+# 发布流水线，由 v* 标签触发。
+#
+# 产物：
+#   - lessord 镜像（前后端一体，界面在二进制里；另带 lessor-netcfg）
+#     → Docker Hub（willdockerhub/lessord）
+#     → 阿里云 ACR（registry.cn-shenzhen.aliyuncs.com/willspace/lessord）
+#   - GitHub Release：桌面端 Windows 安装程序（NSIS）+ 两个平台的命令行压缩包
+#
+# 不推 ghcr。secret：DOCKERHUB_USERNAME / DOCKERHUB_TOKEN / ACR_USERNAME / ACR_PASSWORD。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  ACR_REGISTRY: registry.cn-shenzhen.aliyuncs.com
+  ACR_NAMESPACE: willspace
+
+permissions:
+  contents: write
+
+jobs:
+  # 标签必须和工作区版本一致，对不上就当场失败 ——
+  # 好过发出去一个 v0.0.2 标签、里面装着 0.0.1 的二进制。
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验标签与版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          tauri_ver=$(grep -m1 '"version"' ui/src-tauri/tauri.conf.json | sed 's/.*: "\(.*\)".*/\1/')
+          echo "tag=$tag cargo=$cargo_ver tauri=$tauri_ver"
+          [ "$tag" = "$cargo_ver" ] && [ "$tag" = "$tauri_ver" ] || {
+            echo "::error::标签 v$tag 和仓库里的版本号对不上"; exit 1; }
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: ui/package.json
+
+      - name: 构建前端
+        working-directory: ui
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 测试
+        run: cargo test --workspace
+
+  # Linux 二进制 + 镜像。二进制在 runner 上编好放进构建上下文，
+  # 镜像里只做打包（见 docker/Dockerfile.dist 头部说明）。
+  docker:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: ui/package.json
+
+      - name: 构建前端
+        working-directory: ui
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 构建 Linux 二进制
+        run: |
+          cargo build --release -p lessord -p lessor-net
+          cp target/release/lessord target/release/lessor-netcfg docker/
+
+      - name: 打 Linux 命令行压缩包
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          mkdir -p out
+          tar -czf "out/lessor-$v-x86_64-linux.tar.gz" \
+            -C target/release lessord lessor-netcfg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-linux
+          path: out/*.tar.gz
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: 推镜像
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          img_hub="${{ secrets.DOCKERHUB_USERNAME }}/lessord"
+          img_acr="$ACR_REGISTRY/$ACR_NAMESPACE/lessord"
+          docker build -f docker/Dockerfile.dist \
+            -t "$img_hub:$v" -t "$img_hub:latest" \
+            -t "$img_acr:$v" -t "$img_acr:latest" \
+            docker/
+          docker push "$img_hub:$v";  docker push "$img_hub:latest"
+          docker push "$img_acr:$v";  docker push "$img_acr:latest"
+
+  # 桌面端 NSIS 安装程序 + Windows 命令行压缩包，同一台 runner 出两样。
+  windows:
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: ui/package.json
+
+      - name: 构建前端
+        working-directory: ui
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            ui/src-tauri
+
+      - name: 桌面端安装程序
+        working-directory: ui
+        run: bunx tauri build --bundles nsis
+
+      - name: Windows 命令行压缩包
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          cargo build --release -p lessord -p lessor-net
+          mkdir -p out
+          7z a "out/lessor-$v-x86_64-windows.zip" \
+            ./target/release/lessord.exe ./target/release/lessor-netcfg.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: ui/src-tauri/target/release/bundle/nsis/*.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-windows
+          path: out/*.zip
+
+  release:
+    needs: [docker, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 校验产物齐全
+        run: |
+          ls -la dist/
+          test -n "$(ls dist/*-setup.exe)" || { echo "::error::缺桌面端安装程序"; exit 1; }
+          test -n "$(ls dist/*.tar.gz)"    || { echo "::error::缺 Linux 压缩包"; exit 1; }
+          test -n "$(ls dist/*.zip)"       || { echo "::error::缺 Windows 压缩包"; exit 1; }
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            前后端一体的跨平台 DHCP 服务器。界面已打进 `lessord` 二进制，一个文件即可运行。
+
+            ## 镜像
+
+            ```
+            docker pull willdockerhub/lessord:${{ github.ref_name }}
+            docker pull registry.cn-shenzhen.aliyuncs.com/willspace/lessord:${{ github.ref_name }}
+            ```
+
+            容器里发 DHCP 要 `--network host`（广播过不了 NAT）；管理接口记得
+            `--http 0.0.0.0:8080` 才能从容器外访问。
+
+            ## 本次版本验证到哪一步
+
+            129 个测试；五种真实客户端：busybox udhcpc、systemd-networkd、
+            VMware UEFI 固件（PXE 与 HTTP Boot 两种模式）、iPXE 2.0.0+ ——
+            PXE 一路验到 GRUB 提示符。细节见仓库 docs/。
+
+            ## 已知边界
+
+            早期版本：租约仅内存存储（重启即失）、只支持 IPv4、macOS 上无法做收包隔离。
