@@ -86,11 +86,25 @@ fn rx_socket(port: u16, server_ip: Ipv4Addr, iface: Option<&str>) -> Result<UdpS
     };
 
     let addr: SocketAddr = SocketAddrV4::new(bind_ip, port).into();
-    sock.bind(&addr.into()).with_context(|| {
-        format!("绑定 {bind_ip}:{port} 失败（需要管理员权限，或端口被占用）")
-    })?;
+    sock.bind(&addr.into())
+        .with_context(|| format!("绑定 {bind_ip}:{port} 失败 —— {}", bind_failure_hint(port)))?;
     sock.set_nonblocking(true)?;
     Ok(UdpSocket::from_std(sock.into())?)
+}
+
+/// 绑定失败时该往哪儿查。
+///
+/// 不要笼统地说"需要管理员权限"：**Windows 上绑低端口根本不需要管理员**
+/// （"端口 < 1024 需特权"是 Unix 的约定），这么写会让人白白去提权，
+/// 而真正的原因通常是端口被别的 DHCP 服务占着。
+fn bind_failure_hint(port: u16) -> &'static str {
+    if cfg!(target_os = "windows") {
+        "端口多半被占用了。常见来源：Internet Connection Sharing（网卡共享）、         VMware DHCP Service、其它 DHCP 工具。         查：Get-NetUDPEndpoint -LocalPort 67"
+    } else if port < 1024 {
+        "低端口需要权限或端口被占用。用 root 运行，或给二进制设权限后普通用户运行：         sudo setcap cap_net_bind_service+ep <lessord 路径>"
+    } else {
+        "端口被占用了"
+    }
 }
 
 fn tx_socket(server_ip: Ipv4Addr) -> Result<UdpSocket> {

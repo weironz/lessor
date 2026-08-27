@@ -1,0 +1,9 @@
+# shell 脚本必须是 LF。这些脚本要么在容器里跑、要么被 bind-mount 进容器，
+# 带 CRLF 的话 sh 会把 \r 当成命令名的一部分，报一堆莫名其妙的错。
+# 在 Windows 上开发时 core.autocrlf 默认会把它们转成 CRLF，所以要显式钉住。
+*.sh text eol=lf
+
+# 同理：容器里读的配置和 Dockerfile
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

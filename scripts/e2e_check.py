@@ -1,4 +1,5 @@
 """lessord 端到端检查：WebSocket 事件流 + 静态保留 + 撤销租约。"""
+import os
 import asyncio
 import json
 import socket
@@ -9,12 +10,19 @@ import urllib.request
 
 import websockets
 
-API = "http://127.0.0.1:8099"
-WS = "ws://127.0.0.1:8099/api/events"
-SRV_PORT, CLI_PORT = 6767, 6768
+API = os.environ.get("LESSOR_API", "http://127.0.0.1:8099")
+WS = API.replace("http", "ws") + "/api/events"
+# 服务端地址。lessord 在 Windows 上只绑 --listen 给的那个地址（见 dhcp.rs 里
+# 的按平台绑定），所以不能想当然地发给 127.0.0.1 —— 那样内核会回 ICMP 不可达。
+SRV_IP = os.environ.get("LESSOR_SERVER", "127.0.0.1")
+SRV_PORT = int(os.environ.get('LESSOR_DHCP_PORT', 6767))
+CLI_PORT = int(os.environ.get('LESSOR_CLIENT_PORT', 6768))
 MAGIC = b"\x63\x82\x53\x63"
 XID = 0xCAFEBABE
-# 与 --reservation 里配的 MAC 一致，应当拿到 192.168.73.219
+# 与 --reservation 里配的 MAC 一致。期望地址不写死 —— 换个子网跑回归时
+# 写死的值会假报失败，改成从 --reservation 那一侧传进来。
+EXPECT_IP = os.environ.get("LESSOR_EXPECT_IP", "192.168.73.219")
+EXPECT_HOST = os.environ.get("LESSOR_EXPECT_HOST", "bmc-99")
 MAC = bytes.fromhex("ac1f6b8e0099")
 
 
@@ -63,7 +71,7 @@ def handshake():
     offered = server_id = None
     import time
     for mtype, want in ((1, 2), (3, 5)):
-        s.sendto(build(mtype, offered, server_id), ("127.0.0.1", SRV_PORT))
+        s.sendto(build(mtype, offered, server_id), (SRV_IP, SRV_PORT))
         deadline = time.time() + 5
         while time.time() < deadline:
             try:
@@ -117,29 +125,32 @@ async def main():
 
     ok = True
 
-    if ip != "192.168.73.219":
-        print(f"\n!! 静态保留没生效：期望 192.168.73.219，实际 {ip}")
+    if ip != EXPECT_IP:
+        print(f"\n!! 静态保留没生效：期望 {EXPECT_IP}，实际 {ip}")
         ok = False
     else:
         print("\n静态保留生效 ✓")
 
+    # 只看这一条保留租约。同一个服务上可能还有别的客户端留下的租约，
+    # 断言"总数为 1"会让这个脚本没法和别的测试同时跑。
     _, leases = api("/api/leases")
-    if len(leases) != 1 or leases[0]["hostname"] != "bmc-99":
+    mine = [l for l in leases if l["ip"] == ip]
+    if len(mine) != 1 or mine[0].get("hostname") != EXPECT_HOST:
         print(f"!! 租约不对: {leases}")
         ok = False
     else:
-        print(f"租约已记录 ✓  主机名={leases[0]['hostname']} 状态={leases[0]['state']}")
+        print(f"租约已记录 ✓  主机名={mine[0]['hostname']} 状态={mine[0]['state']}")
 
     status, _ = api(f"/api/leases/1/{ip}", method="DELETE")
     _, leases = api("/api/leases")
-    if status != 204 or leases:
+    if status != 204 or any(l["ip"] == ip for l in leases):
         print(f"!! 撤销失败 status={status} 剩余={leases}")
         ok = False
     else:
         print("撤销租约 ✓")
 
     try:
-        api("/api/leases/1/192.168.73.199", method="DELETE")
+        api("/api/leases/1/203.0.113.199", method="DELETE")   # TEST-NET-3，必然不在池里
         print("!! 撤销不存在的租约应返回 404")
         ok = False
     except urllib.error.HTTPError as e:

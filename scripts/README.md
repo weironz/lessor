@@ -1,7 +1,9 @@
 # 手工验证脚本
 
 `lessord` 还没有集成测试（要真实 socket），这两个脚本用来在改完之后
-快速确认端到端没坏。都用高位端口，不需要管理员权限。
+快速确认端到端没坏。都用高位端口 —— 不是因为低位端口需要提权
+（Windows 上不需要，Linux 上给 `lessord` 设了 `cap_net_bind_service`
+之后也不需要），而是为了不和机器上已有的 DHCP 服务撞车。
 
 先起服务：
 
@@ -14,6 +16,24 @@ cargo run -p lessord -- \
 ```
 
 `--listen` 要换成本机真实存在的一个地址 —— 发送 socket 要绑在它上面。
+`lessor-netcfg list` 能列出本机网卡，不需要特权。
+
+## 环境变量
+
+两个脚本的默认值对应上面那条命令。换子网或换端口跑的时候用环境变量覆盖，
+不要改脚本里的常量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `LESSOR_SERVER` | `127.0.0.1` | 服务端地址，**必须和 `--listen` 一致** |
+| `LESSOR_DHCP_PORT` | `6767` | 对应 `--dhcp-port` |
+| `LESSOR_CLIENT_PORT` | `6768` | 对应 `--client-port` |
+| `LESSOR_API` | `http://127.0.0.1:8099` | 对应 `--http` |
+| `LESSOR_EXPECT_IP` | `192.168.73.219` | `e2e_check.py` 期望保留到的地址 |
+
+`LESSOR_SERVER` 不能省成 `127.0.0.1`：Windows 上 `lessord` 只绑 `--listen`
+给的那个地址（见 `crates/lessord/src/dhcp.rs` 里按平台绑定的那段），
+发给环回口的包内核会直接回 ICMP 不可达，脚本会看到 `ConnectionResetError`。
 
 ## fake_client.py
 
@@ -21,7 +41,7 @@ cargo run -p lessord -- \
 打印拿到的地址、掩码、网关、DNS、租期。
 
 ```bash
-python scripts/fake_client.py
+LESSOR_SERVER=192.168.73.1 python scripts/fake_client.py
 ```
 
 ## e2e_check.py
@@ -30,7 +50,17 @@ python scripts/fake_client.py
 以及撤销不存在的租约返回 404。
 
 ```bash
-uv run --with websockets python scripts/e2e_check.py
+LESSOR_SERVER=192.168.73.1 uv run --with websockets python scripts/e2e_check.py
 ```
 
 Windows 控制台若报编码错误，加 `PYTHONIOENCODING=utf-8`。
+
+## 更接近真实的那一档
+
+上面两个脚本是自己拼的报文，覆盖不到真实客户端的怪癖（比如 option 61
+写成 `01+MAC`）。`docker/` 下有一套用 busybox `udhcpc` 的回归，
+跑真实客户端 + Linux 的 `SO_BINDTODEVICE` 隔离路径：
+
+```bash
+cd docker && docker compose up --abort-on-container-exit --build
+```

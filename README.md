@@ -38,6 +38,50 @@
 共 112 个测试。已用 busybox 的 udhcpc（docker）和 VMware 的 UEFI 固件
 两种真实客户端验证过。
 
+### 不需要特权
+
+`lessord` **不需要管理员 / root**。
+
+- **Windows** —— 直接跑。「端口小于 1024 需要特权」是 Unix 的约定，
+  Windows 从来没有采纳；绑 UDP 67 普通用户就能做
+- **Linux** —— 安装时给二进制设一次权限，之后普通用户运行：
+
+  ```bash
+  sudo setcap cap_net_bind_service+ep /usr/local/bin/lessord
+  ```
+
+- **容器** —— 以 root 运行容器（默认）即可，或同样用 `setcap`。
+  注意 `docker run --cap-add NET_BIND_SERVICE --user 1000` **不生效** ——
+  `--cap-add` 只放进 bounding set，非 root 进程的有效集里拿不到，
+  必须走 file capability 或 ambient
+
+  上面两条是实测的，不是推断：[`docker/setcaptest.sh`](docker/setcaptest.sh)
+  逐个组合跑给你看，[`docker/capcheck.sh`](docker/capcheck.sh) 验证非 root 的情形。
+  跑的时候要显式带上 `--sysctl net.ipv4.ip_unprivileged_port_start=1024`，
+  否则 Docker Desktop 的内核把它设成 0，三种组合会全部"成功"，什么也证明不了。
+
+  顺带测出来的一条：`SO_BINDTODEVICE` 只要 `cap_net_bind_service` 就够，
+  不需要额外的 `cap_net_raw`。
+
+整个项目里唯一需要特权的是**修改网卡地址**，它被单独拆成了
+[`lessor-netcfg`](#配置网卡地址)，不在服务进程里。
+
+### 配置网卡地址
+
+网卡已经在目标网段上时，这一步不需要。需要的话：
+
+```bash
+lessor-netcfg list                              # 不需要特权
+sudo lessor-netcfg set eth0 192.168.88.1/24     # 需要特权
+lessor-netcfg restore eth0                      # 需要特权
+```
+
+权限不足时退出码是 **77**，与参数错误（2）区分开 —— 脚本可以据此决定
+"换个身份重来"而不是"参数写错了"。
+
+拆成独立程序是有意的：自动化流程里改地址是一次性的前置步骤，
+DHCP 服务是长期运行的，两者的权限需求本就不同，不该绑在一起。
+
 ### 收包隔离 —— 三个平台不一样
 
 服务进程若不能把收包限制在指定网卡上，就会应答**本机所有网卡**收到的
@@ -59,8 +103,6 @@ cargo run -p lessord --   --listen 192.168.88.1 --prefix 24 --pool 192.168.88.10
 ```
 
 `--listen` 是本机在该网段上的地址，子网由它和 `--prefix` 推出。
-绑 UDP 67 需要管理员权限；加 `--dhcp-port 6767 --client-port 6768`
-可以在高位端口免特权跑，便于验证。
 
 HTTP 接口默认只听 `127.0.0.1:8080` —— 这是管理接口，不该暴露到网络上。
 
@@ -147,10 +189,9 @@ lessor-core/     纯逻辑，无 IO、无 async、不读时钟 —— 三平台�
                    lease   租约与状态机
                    store   LeaseStore trait + 内存实现 + 分配算法
                    server  RFC 2131 报文决策
-lessor-net/      平台层
-                   windows: IP Helper API
-                   linux:   rtnetlink + SO_BINDTODEVICE
-                   macos:   ifconfig
+lessor-net/      平台层：网卡枚举（纯 Rust，三平台共用）
+                 + 地址配置（netsh / ip / ifconfig，唯一需要特权的地方）
+                 附带 lessor-netcfg 可执行程序
 discovery/       静态 IP 设备发现（IPv6 组播 / RMCP / 邻居表）
 lessord/         tokio + axum，UDP 67 与 HTTP API 同进程
 ui/              一套前端，Web 与桌面复用
@@ -158,8 +199,9 @@ ui/src-tauri/    桌面外壳。纯客户端，零特权 —— 加载的就是 
                  提供的那份界面，因此前端只有一套代码、一套接口
 ```
 
-**为什么前后端分离**：DHCP 要绑 UDP 67，必须特权运行。把浏览器内核也拉进特权进程是糟糕的做法，
-所以 `lessord` 特权驻留只管网络，界面是普通权限的纯客户端，两者通过 HTTP/WebSocket 通信。
+**为什么前后端分离**：`lessord` 是长期驻留的网络进程，界面是随时开关的客户端，
+两者的生命周期本来就不一样 —— 服务可以装成系统服务，也可以跑在机房另一台机器上。
+分开之后桌面端只是加载同一份界面的外壳，Web 与桌面因此共用一套代码、一套接口。
 
 报文编解码用 [`dhcproto`](https://github.com/bluecatengineering/dhcproto)，
 本项目实现的是它之上的服务端策略：分配优先级、租约生命周期、各类报文的应答决策。

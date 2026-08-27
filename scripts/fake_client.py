@@ -3,6 +3,7 @@
 按 xid + 报文类型匹配，忽略重复包。REQUEST 会带上 option 50/54，
 和真实客户端在 SELECTING 阶段的行为一致。
 """
+import os
 import socket
 import struct
 import sys
@@ -11,7 +12,11 @@ import time
 MAGIC = b"\x63\x82\x53\x63"
 MAC = bytes.fromhex("ac1f6b8e0001")
 XID = 0xDEADBEEF
-SRV_PORT, CLI_PORT = 6767, 6768
+# 服务端地址。lessord 在 Windows 上只绑 --listen 给的那个地址（见 dhcp.rs 里
+# 的按平台绑定），所以不能想当然地发给 127.0.0.1 —— 那样内核会回 ICMP 不可达。
+SRV_IP = os.environ.get("LESSOR_SERVER", "127.0.0.1")
+SRV_PORT = int(os.environ.get('LESSOR_DHCP_PORT', 6767))
+CLI_PORT = int(os.environ.get('LESSOR_CLIENT_PORT', 6768))
 VENDOR = b"PXEClient:Arch:00007:UNDI:003016"   # option 60
 
 
@@ -55,7 +60,7 @@ offered = None
 server_id = None
 
 for name, mtype, want in (("DISCOVER", 1, 2), ("REQUEST", 3, 5)):
-    s.sendto(build(mtype, offered, server_id), ("127.0.0.1", SRV_PORT))
+    s.sendto(build(mtype, offered, server_id), (SRV_IP, SRV_PORT))
     print(f"-> 发出 {name}" + (f"  (请求 {offered})" if offered else ""))
 
     deadline, hit = time.time() + 5, None

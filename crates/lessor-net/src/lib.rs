@@ -17,12 +17,56 @@ pub use platform::{restore_dhcp, set_static};
 pub enum NetError {
     #[error("枚举网卡失败: {0}")]
     Enumerate(String),
+
     #[error("找不到网卡 {0}")]
     NoSuchInterface(String),
+
+    /// 权限不足。单独一个变体是因为它的处理方式完全不同 ——
+    /// 别的错误要改参数，这个只需要换个身份重跑。混在一起的话，
+    /// 调用者只能对着一句"拒绝访问"猜原因。
+    #[error("修改网卡 {iface} 需要{}，当前身份不足", privilege_name())]
+    NeedsPrivilege { iface: String },
+
     #[error("配置网卡 {iface} 失败: {detail}")]
     Configure { iface: String, detail: String },
+
     #[error("当前平台不支持该操作")]
     Unsupported,
+}
+
+/// 各平台对"提权"的叫法不同，报错时用当地的说法。
+pub fn privilege_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "管理员权限"
+    } else {
+        "root 权限（或 CAP_NET_ADMIN）"
+    }
+}
+
+impl NetError {
+    /// 这个错误能不能靠换身份重跑解决。
+    pub fn is_privilege(&self) -> bool {
+        matches!(self, Self::NeedsPrivilege { .. })
+    }
+
+    /// 给使用者的下一步建议。报错时只说"失败"没有用，要说怎么办。
+    pub fn hint(&self) -> Option<String> {
+        match self {
+            Self::NeedsPrivilege { .. } => Some(if cfg!(target_os = "windows") {
+                "以管理员身份重新运行，或先手工把网卡地址配好。\n\
+                 注意 lessord 本身不需要管理员 —— 只有修改网卡地址这一步需要。"
+                    .to_owned()
+            } else {
+                "用 sudo 重新运行，或先手工把网卡地址配好。\n\
+                 注意 lessord 本身不需要 root —— 只有修改网卡地址这一步需要。"
+                    .to_owned()
+            }),
+            Self::NoSuchInterface(_) => {
+                Some("用 `lessor-netcfg list` 看看本机有哪些网卡。".to_owned())
+            }
+            _ => None,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, NetError>;

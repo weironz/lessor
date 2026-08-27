@@ -12,6 +12,28 @@ use tracing::debug;
 
 use crate::{NetError, Result};
 
+/// 从命令输出里认出"权限不足"。
+///
+/// 这些工具都不用退出码区分错误类型，只能看文本。各家措辞不同，
+/// 而且 Windows 上还是本地化的 —— 中文系统上是"需要提升"，
+/// 所以两种语言的关键词都要认。
+fn looks_like_permission_error(text: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        // Windows（英文 / 中文）
+        "requires elevation",
+        "Access is denied",
+        "需要提升",
+        "拒绝访问",
+        "以管理员",
+        // Unix
+        "Operation not permitted",
+        "Permission denied",
+        "must be root",
+        "not permitted",
+    ];
+    NEEDLES.iter().any(|n| text.contains(n))
+}
+
 /// 跑一条命令，失败时把 stderr 带进错误里 —— 排查时没有这个几乎没法定位。
 fn run(iface: &str, program: &str, args: &[&str]) -> Result<String> {
     debug!(program, ?args, "执行");
@@ -23,19 +45,27 @@ fn run(iface: &str, program: &str, args: &[&str]) -> Result<String> {
             detail: format!("无法执行 {program}: {e}"),
         })?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let msg = if err.trim().is_empty() {
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        } else {
-            err.into_owned()
-        };
-        Err(NetError::Configure {
-            iface: iface.to_owned(),
-            detail: msg.trim().to_owned(),
-        })
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
+
+    // netsh 之类的工具会把错误写到 stdout 而不是 stderr，两边都要看
+    let err = String::from_utf8_lossy(&out.stderr);
+    let msg = if err.trim().is_empty() {
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    } else {
+        err.into_owned()
+    };
+    let msg = msg.trim();
+
+    if looks_like_permission_error(msg) {
+        return Err(NetError::NeedsPrivilege {
+            iface: iface.to_owned(),
+        });
+    }
+    Err(NetError::Configure {
+        iface: iface.to_owned(),
+        detail: msg.to_owned(),
+    })
 }
 
 /// 把网卡设成静态地址。
@@ -200,15 +230,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn errors_name_the_interface_and_carry_the_detail() {
-        // 用一个必然不存在的网卡名，确认错误信息能定位问题
+    fn permission_errors_are_recognised_in_both_languages() {
+        // Windows 的 netsh 输出是本地化的，中英文都得认 ——
+        // 只认英文的话，中文系统上权限问题会被当成参数错误
+        for text in [
+            "The requested operation requires elevation.",
+            "请求的操作需要提升。",
+            "拒绝访问。",
+            "Access is denied.",
+            "ip: Operation not permitted",
+            "RTNETLINK answers: Permission denied",
+        ] {
+            assert!(looks_like_permission_error(text), "应识别为权限问题: {text}");
+        }
+    }
+
+    #[test]
+    fn ordinary_failures_are_not_mistaken_for_permission_errors() {
+        for text in [
+            "Element not found.",
+            "找不到元素。",
+            "Cannot find device \"eth9\"",
+            "",
+        ] {
+            assert!(
+                !looks_like_permission_error(text),
+                "不该识别为权限问题: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn errors_are_actionable() {
+        // 用一个必然不存在的网卡名。非管理员身份下，netsh 会先撞上权限；
+        // 管理员身份下才会走到"网卡不存在"。两种都要给得出下一步。
         let err = set_static("不存在的网卡xyz", Ipv4Addr::new(10, 254, 254, 1), 24)
             .expect_err("不存在的网卡不该配置成功");
-        let text = err.to_string();
-        assert!(text.contains("不存在的网卡xyz"), "错误里要有网卡名: {text}");
-        assert!(
-            matches!(err, NetError::Configure { .. } | NetError::Unsupported),
-            "实际: {err:?}"
-        );
+
+        match &err {
+            NetError::NeedsPrivilege { iface } => {
+                assert_eq!(iface, "不存在的网卡xyz");
+                assert!(err.is_privilege());
+                assert!(err.hint().is_some(), "权限错误必须给出下一步");
+            }
+            NetError::Configure { iface, .. } => {
+                assert_eq!(iface, "不存在的网卡xyz");
+                assert!(!err.is_privilege());
+            }
+            NetError::Unsupported => {}
+            other => panic!("意料之外的错误: {other:?}"),
+        }
     }
 }
