@@ -1,0 +1,37 @@
+# 发布用的后端镜像。
+#
+# 和同目录的 Dockerfile 不是一回事：那个是本地拿 udhcpc 打回归用的测试台，
+# 只放 lessord；这个是对外发布的，多带一个 lessor-netcfg，也带上 OCI 标签。
+#
+# 二进制在 CI 里构建好之后放进构建上下文，这里只做打包 —— 不在镜像里重编，
+# 省得把整个依赖树拉进来。
+#
+#   (cd ui && bun install && bun run build)  # 必须先构建前端，见 crates/lessord/src/ui.rs
+#   cargo build --release -p lessord -p lessor-net
+#   cp target/release/lessord target/release/lessor-netcfg docker/
+#   docker build -f docker/Dockerfile.dist -t lessord docker/
+FROM debian:trixie-slim
+
+# iproute2 是 lessor-netcfg 在 Linux 上配地址要用的；ca-certificates 给 HTTPS
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends iproute2 ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY lessord /usr/local/bin/lessord
+COPY lessor-netcfg /usr/local/bin/lessor-netcfg
+
+# DHCP 服务端口，以及管理接口。
+#
+# 注意：容器里的 DHCP 只对同一个 docker 网络有意义。要给物理网段发地址，
+# 必须用 --network host —— DHCP 靠广播工作，NAT 过不去。
+EXPOSE 67/udp 8080/tcp
+
+# 默认只听本机的管理接口不适合容器（外面就访问不到了），所以这里显式放开。
+# 这是管理接口，别直接暴露到不可信网络上。
+ENTRYPOINT ["/usr/local/bin/lessord"]
+CMD ["--help"]
+
+LABEL org.opencontainers.image.title="lessord" \
+      org.opencontainers.image.description="lessor 的 DHCP 服务进程，内嵌 Web 界面" \
+      org.opencontainers.image.source="https://github.com/weironz/lessor" \
+      org.opencontainers.image.licenses="MIT"

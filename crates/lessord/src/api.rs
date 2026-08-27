@@ -205,7 +205,7 @@ async fn serve_ui(uri: Uri) -> Response {
         concat!(
             "lessor ",
             env!("CARGO_PKG_VERSION"),
-            "\n\n界面尚未构建。在 ui/ 目录执行 `pnpm install && pnpm build`，\n",
+            "\n\n界面尚未构建。在 ui/ 目录执行 `bun install && bun run build`，\n",
             "然后重新编译 lessord。\n\n可用接口：\n",
             "  GET    /healthz\n",
             "  GET    /api/state\n",

@@ -21,3 +21,6 @@ src-tauri/target/
 
 # Python
 __pycache__/
+
+# CI / 本地打镜像时暂存进来的产物
+/docker/lessor-netcfg

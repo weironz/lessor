@@ -1,7 +1,12 @@
 {
   "name": "lessor-ui",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.4.0",
+  "engines": {
+    "bun": ">=1.4.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
