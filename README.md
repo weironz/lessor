@@ -28,11 +28,35 @@
 
 早期开发中，**还不能用**。
 
-- [x] `lessor-core` —— 地址池、租约状态机、报文决策（76 个测试）
-- [ ] `lessord` —— tokio UDP 循环 + axum HTTP/WebSocket
+- [x] `lessor-core` —— 地址池、租约状态机、报文决策
+- [x] `lessord` —— tokio UDP 循环 + axum HTTP/WebSocket，已端到端跑通
 - [ ] `lessor-net` —— 平台层：网卡枚举与地址配置
 - [ ] `discovery` —— 发现已配置静态 IP 的设备
 - [ ] UI —— Svelte + Vite，Tauri 套壳做桌面端
+
+共 83 个测试。
+
+### 跑一个试试
+
+```bash
+cargo run -p lessord --   --listen 192.168.88.1 --prefix 24 --pool 192.168.88.10-192.168.88.20   --router 192.168.88.1 --dns 223.5.5.5
+```
+
+`--listen` 是本机在该网段上的地址，子网由它和 `--prefix` 推出。
+绑 UDP 67 需要管理员权限；加 `--dhcp-port 6767 --client-port 6768`
+可以在高位端口免特权跑，便于验证。
+
+HTTP 接口默认只听 `127.0.0.1:8080` —— 这是管理接口，不该暴露到网络上。
+
+```
+GET    /api/state              作用域、容量、已用、监听器
+GET    /api/leases             全部租约
+DELETE /api/leases/{scope}/{ip}  撤销一条租约
+GET    /api/events             WebSocket，实时推送每个报文的处理结果
+```
+
+`scripts/` 下有两个手工验证脚本：`fake_client.py` 走一遍完整握手，
+`e2e_check.py` 连 WebSocket 并检查保留、撤销等行为。
 
 ### core 已具备
 
@@ -43,6 +67,17 @@
 - **丢弃原因** —— 不应答时给出 `DropReason`，界面上能回答"为什么这台机器插上没反应"
 - **`vendor_class`（选项 60）** —— 记录并识别 PXE 客户端
 - 作用域启用/禁用；容量统计；`MacAddr` 序列化为 `"ac:1f:6b:8e:00:01"`
+
+### lessord 已具备
+
+- 每个监听器一对 socket：收绑 `0.0.0.0:67`，**发绑本机地址** ——
+  广播应答只从对应网卡出去，不会打扰别的网段
+- Linux 上用 `SO_BINDTODEVICE` 把 socket 钉在网卡上，多网卡才真正干净；
+  其它平台上配多个监听器时会给出告警
+- WebSocket 推送每个报文的处理结果（含丢弃原因），慢客户端只丢事件、
+  永远不会拖住 DHCP 主循环
+- 无配置文件的快捷启动，含 `--reservation MAC=IP[=主机名]`
+- 后台定期回收过期租约
 
 ## 架构
 

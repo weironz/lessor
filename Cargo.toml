@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/lessor-core",
+    "crates/lessord",
 ]
 
 [workspace.package]
@@ -19,6 +20,12 @@ serde_json = "1"
 thiserror = "2"
 tracing   = "0.1"
 tokio     = { version = "1", features = ["full"] }
+axum      = { version = "0.8", features = ["ws"] }
+socket2   = { version = "0.5", features = ["all"] }
+clap      = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow    = "1"
+ipnet     = { version = "2", features = ["serde"] }
 
 [profile.release]
 opt-level = "z"

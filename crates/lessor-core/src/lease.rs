@@ -25,6 +25,7 @@ pub enum LeaseState {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Lease {
     pub ip: Ipv4Addr,
     pub client: ClientId,
@@ -139,6 +140,7 @@ mod tests {
         let j = serde_json::to_string(&l).unwrap();
         assert!(j.contains(r#""00:01:02:03:04:05""#), "MAC 应是可读字符串");
         assert!(j.contains(r#""state":"bound""#));
+        assert!(j.contains(r#""scopeId""#), "字段名应为 camelCase");
         assert_eq!(serde_json::from_str::<Lease>(&j).unwrap(), l);
     }
 }

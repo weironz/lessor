@@ -28,6 +28,7 @@ pub struct Reservation {
 
 /// 网络引导参数（PXE / iPXE / UEFI HTTP Boot）。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BootConfig {
     /// option 66 —— TFTP 服务器名
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -78,6 +79,7 @@ pub enum ScopeError {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Scope {
     pub id: ScopeId,
     pub name: String,
