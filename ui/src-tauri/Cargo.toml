@@ -1,0 +1,19 @@
+[package]
+name = "lessor-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "lessor 的桌面外壳"
+default-run = "lessor-desktop"
+
+# 独立于主 workspace：Tauri 的构建脚本和依赖树与服务端无关，
+# 混进去只会拖慢 cargo test 之类的日常命令。
+[workspace]
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+tauri = "2"
+serde_json = "1"

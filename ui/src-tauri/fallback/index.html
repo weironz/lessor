@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>lessor</title>
+    <style>
+      :root {
+        --bg: #f4f6f7;
+        --panel: #ffffff;
+        --ink: #151c21;
+        --muted: #6b7a85;
+        --line: #dce3e7;
+        --accent: #0e6e70;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0e1418;
+          --panel: #151d22;
+          --ink: #dbe4e8;
+          --muted: #7f8f99;
+          --line: #253139;
+          --accent: #55b2b4;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+        font-size: 14px;
+        line-height: 1.7;
+      }
+      .card {
+        width: min(560px, 90vw);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 28px 30px;
+      }
+      h1 { margin: 0 0 4px; font-size: 19px; }
+      .sub { margin: 0 0 20px; color: var(--muted); }
+      p { margin: 0 0 14px; }
+      code, input {
+        font-family: "JetBrains Mono", Consolas, ui-monospace, monospace;
+        font-size: 13px;
+      }
+      pre {
+        margin: 0 0 16px;
+        padding: 11px 13px;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        overflow-x: auto;
+        font-size: 12.5px;
+      }
+      .row { display: flex; gap: 8px; margin-bottom: 14px; }
+      input {
+        flex: 1;
+        padding: 7px 10px;
+        color: var(--ink);
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+      }
+      button {
+        font: inherit;
+        font-size: 13px;
+        padding: 7px 16px;
+        color: #fff;
+        background: var(--accent);
+        border: 1px solid var(--accent);
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button:hover { filter: brightness(1.1); }
+      .status { color: var(--muted); font-size: 13px; }
+      .dot {
+        display: inline-block;
+        width: 7px; height: 7px;
+        margin-right: 6px;
+        border-radius: 50%;
+        background: var(--muted);
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+      @keyframes pulse { 50% { opacity: 0.25; } }
+      @media (prefers-reduced-motion: reduce) { .dot { animation: none; } }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>连不上 lessord</h1>
+      <p class="sub">桌面端只是界面，DHCP 服务由 lessord 提供，需要先把它跑起来。</p>
+
+      <pre>lessord --listen &lt;本机在该网段上的地址&gt; \
+        --prefix 24 \
+        --pool 192.168.88.10-192.168.88.20</pre>
+
+      <p>服务默认监听 <code>127.0.0.1:8080</code>。跑在别处的话改这里：</p>
+
+      <div class="row">
+        <input id="url" spellcheck="false" />
+        <button id="go">连接</button>
+      </div>
+
+      <p class="status"><span class="dot"></span><span id="msg">正在等待服务…</span></p>
+    </div>
+
+    <script>
+      const input = document.getElementById('url')
+      const msg = document.getElementById('msg')
+      input.value = window.__LESSOR_URL__ || 'http://127.0.0.1:8080'
+
+      let tries = 0
+
+      async function probe() {
+        const url = input.value.replace(/\/+$/, '')
+        try {
+          // 只要能拿到 200 就说明服务活着
+          const res = await fetch(url + '/healthz', { cache: 'no-store' })
+          if (res.ok) {
+            msg.textContent = '已连上，正在打开界面…'
+            location.href = url + '/'
+            return true
+          }
+        } catch {
+          // 还没起来，继续等
+        }
+        tries += 1
+        msg.textContent = `正在等待服务…（第 ${tries} 次尝试）`
+        return false
+      }
+
+      document.getElementById('go').addEventListener('click', probe)
+      input.addEventListener('keydown', (e) => e.key === 'Enter' && probe())
+
+      // 服务起来后自动进去，不用手动点
+      setInterval(probe, 2000)
+      probe()
+    </script>
+  </body>
+</html>

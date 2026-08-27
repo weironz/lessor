@@ -33,7 +33,7 @@
 - [x] `lessor-net` —— 网卡枚举与地址配置
 - [x] `discovery` —— 发现已配置静态 IP 的设备
 - [x] Web UI —— Svelte + Vite，打包进二进制
-- [ ] 桌面端 —— Tauri 套同一份 UI
+- [x] 桌面端 —— Tauri 套同一份 UI
 
 共 112 个测试。已用 busybox 的 udhcpc（docker）和 VMware 的 UEFI 固件
 两种真实客户端验证过。
@@ -154,6 +154,8 @@ lessor-net/      平台层
 discovery/       静态 IP 设备发现（IPv6 组播 / RMCP / 邻居表）
 lessord/         tokio + axum，UDP 67 与 HTTP API 同进程
 ui/              一套前端，Web 与桌面复用
+ui/src-tauri/    桌面外壳。纯客户端，零特权 —— 加载的就是 lessord
+                 提供的那份界面，因此前端只有一套代码、一套接口
 ```
 
 **为什么前后端分离**：DHCP 要绑 UDP 67，必须特权运行。把浏览器内核也拉进特权进程是糟糕的做法，

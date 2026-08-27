@@ -107,6 +107,7 @@ impl Config {
         scope.lease_secs = o.lease_secs;
         scope.reservations = o.reservations;
         scope.boot = o.boot;
+        scope.extra_options = o.extra_options;
         // 临时场景通常希望地址尽快回收
         scope.offer_secs = 30.min(o.lease_secs);
 
@@ -136,6 +137,8 @@ pub struct Quick {
     pub reservations: Vec<Reservation>,
     /// PXE / UEFI HTTP Boot 参数。不给的话不下发引导选项。
     pub boot: Option<lessor_core::BootConfig>,
+    /// 额外的原始 DHCP 选项，本结构没有专门字段的都走这里。
+    pub extra_options: Vec<(u8, Vec<u8>)>,
 }
 
 /// 命令行里 `192.168.88.10-192.168.88.20` 形式的区间。
@@ -146,6 +149,30 @@ pub fn parse_range(s: &str) -> Result<Range> {
     let start: Ipv4Addr = a.trim().parse().with_context(|| format!("起始地址 {a} 不合法"))?;
     let end: Ipv4Addr = b.trim().parse().with_context(|| format!("结束地址 {b} 不合法"))?;
     Range::new(start, end).with_context(|| format!("起始地址不能大于结束地址：{s}"))
+}
+
+/// 命令行里的原始选项，形如 `43=060108ff`（编号=十六进制值）。
+///
+/// 有它就不用为每个冷门选项加一个参数 —— DHCP 选项有一百多个，
+/// 专门字段只覆盖常用的那些。
+pub fn parse_option(s: &str) -> Result<(u8, Vec<u8>)> {
+    let (code, hex) = s
+        .split_once('=')
+        .with_context(|| format!("选项格式应为 编号=十六进制，收到 {s}"))?;
+    let code: u8 = code
+        .trim()
+        .parse()
+        .with_context(|| format!("选项编号 {code} 不合法（0-255）"))?;
+    let hex: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+    if hex.len() % 2 != 0 {
+        bail!("选项 {code} 的十六进制值长度必须是偶数：{hex}");
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+        .collect::<std::result::Result<Vec<u8>, _>>()
+        .with_context(|| format!("选项 {code} 的值不是合法十六进制：{hex}"))?;
+    Ok((code, bytes))
 }
 
 /// 让 `Reservation` 能从 `MAC=IP` 或 `MAC=IP=主机名` 解析。
@@ -183,6 +210,7 @@ mod tests {
             iface: None,
             reservations: vec![],
             boot: None,
+            extra_options: vec![],
         })
         .unwrap()
     }
@@ -229,6 +257,16 @@ mod tests {
         assert_eq!(r.end, ip(192, 168, 88, 20));
         assert!(parse_range("192.168.88.20-192.168.88.10").is_err());
         assert!(parse_range("192.168.88.10").is_err());
+    }
+
+    #[test]
+    fn option_parses_from_hex() {
+        assert_eq!(parse_option("43=060108ff").unwrap(), (43, vec![0x06, 0x01, 0x08, 0xff]));
+        assert_eq!(parse_option("252=").unwrap(), (252, vec![]));
+        assert!(parse_option("43=abc").is_err(), "奇数长度应拒绝");
+        assert!(parse_option("999=ff").is_err(), "编号超出 u8 应拒绝");
+        assert!(parse_option("43=zz").is_err(), "非十六进制应拒绝");
+        assert!(parse_option("43").is_err(), "缺少等号应拒绝");
     }
 
     #[test]

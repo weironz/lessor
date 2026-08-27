@@ -68,6 +68,10 @@ struct Cli {
     #[arg(long, value_name = "名称")]
     tftp_server: Option<String>,
 
+    /// 额外的原始 DHCP 选项，形如 43=060108ff（编号=十六进制），可重复
+    #[arg(long = "option", value_name = "编号=十六进制")]
+    options: Vec<String>,
+
     /// 绑定到指定网卡。仅 Linux 生效，多网卡时靠它区分作用域。
     #[arg(long, value_name = "网卡名")]
     iface: Option<String>,
@@ -128,6 +132,11 @@ impl Cli {
                         next_server: self.next_server,
                         server_name: self.tftp_server.clone(),
                     }),
+                    extra_options: self
+                        .options
+                        .iter()
+                        .map(|o| config::parse_option(o))
+                        .collect::<Result<Vec<_>>>()?,
                 })?
             }
         };

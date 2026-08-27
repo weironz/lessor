@@ -17,3 +17,4 @@ src-tauri/target/
 .DS_Store
 /target-alt
 /docker/lessord
+/ui/src-tauri/target
