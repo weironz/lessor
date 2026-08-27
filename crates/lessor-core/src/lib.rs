@@ -11,6 +11,8 @@ pub mod store;
 
 pub use addr::{ClientId, MacAddr, ParseMacError, Range};
 pub use lease::{Lease, LeaseState, UnixTime};
-pub use scope::{BootConfig, Reservation, Scope, ScopeError, ScopeId};
-pub use server::{DropReason, Outcome, RecvCtx, Reply, ReplyDest, ServerConfig, handle};
+pub use scope::{BootClient, BootConfig, Reservation, Scope, ScopeError, ScopeId};
+pub use server::{
+    DropReason, Outcome, RecvCtx, Reply, ReplyDest, ServerConfig, boot_client_of, handle,
+};
 pub use store::{AllocSource, Allocation, LeaseStore, MemoryStore, allocate};

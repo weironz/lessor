@@ -56,7 +56,7 @@ struct Cli {
     #[arg(long = "reservation", value_name = "MAC=IP[=主机名]")]
     reservations: Vec<String>,
 
-    /// 引导文件名（option 67）。PXE 固件拿不到它就不会完成握手。
+    /// 引导文件名（option 67）。给 PXE 固件和未自报身份的客户端。
     #[arg(long, value_name = "文件名")]
     boot_file: Option<String>,
 
@@ -67,6 +67,15 @@ struct Cli {
     /// TFTP 服务器名（option 66）
     #[arg(long, value_name = "名称")]
     tftp_server: Option<String>,
+
+    /// 给 UEFI HTTP Boot 客户端的引导 URL。它不走 TFTP，必须是完整 URL。
+    #[arg(long, value_name = "URL")]
+    http_boot_url: Option<String>,
+
+    /// 给已经跑起来的 iPXE 的引导脚本 URL。不配的话 iPXE 会拿到和固件
+    /// 一样的 --boot-file —— 那通常就是 iPXE 自己，会无限自举。
+    #[arg(long, value_name = "URL")]
+    ipxe_url: Option<String>,
 
     /// 额外的原始 DHCP 选项，形如 43=060108ff（编号=十六进制），可重复
     #[arg(long = "option", value_name = "编号=十六进制")]
@@ -103,9 +112,9 @@ impl Cli {
         let cfg = match &self.config {
             Some(path) => Config::load(path)?,
             None => {
-                let listen = self.listen.context(
-                    "没给 --config 时必须给 --listen（本机在该网段上的地址）",
-                )?;
+                let listen = self
+                    .listen
+                    .context("没给 --config 时必须给 --listen（本机在该网段上的地址）")?;
                 let pool = self
                     .pool
                     .as_deref()
@@ -124,14 +133,16 @@ impl Cli {
                     lease_secs: self.lease_secs,
                     iface: self.iface.clone(),
                     reservations,
-                    boot: (self.boot_file.is_some()
-                        || self.next_server.is_some()
-                        || self.tftp_server.is_some())
-                    .then(|| lessor_core::BootConfig {
-                        filename: self.boot_file.clone(),
-                        next_server: self.next_server,
-                        server_name: self.tftp_server.clone(),
-                    }),
+                    boot: {
+                        let boot = lessor_core::BootConfig {
+                            filename: self.boot_file.clone(),
+                            next_server: self.next_server,
+                            server_name: self.tftp_server.clone(),
+                            http_url: self.http_boot_url.clone(),
+                            ipxe_url: self.ipxe_url.clone(),
+                        };
+                        (!boot.is_empty()).then_some(boot)
+                    },
                     extra_options: self
                         .options
                         .iter()

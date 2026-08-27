@@ -105,8 +105,16 @@ fn discover_gets_offer_with_scope_options() {
         Some(&DhcpOption::Router(vec![SERVER]))
     );
     assert_eq!(opt_u32(&r.msg, OptionCode::AddressLeaseTime), Some(3600));
-    assert_eq!(opt_u32(&r.msg, OptionCode::Renewal), Some(1800), "T1 = 一半");
-    assert_eq!(opt_u32(&r.msg, OptionCode::Rebinding), Some(3150), "T2 = 7/8");
+    assert_eq!(
+        opt_u32(&r.msg, OptionCode::Renewal),
+        Some(1800),
+        "T1 = 一半"
+    );
+    assert_eq!(
+        opt_u32(&r.msg, OptionCode::Rebinding),
+        Some(3150),
+        "T2 = 7/8"
+    );
 }
 
 #[test]
@@ -207,7 +215,10 @@ fn request_for_someone_elses_address_gets_nak() {
     let (c, mut t) = (cfg(), MemoryStore::new());
     t.insert(bound(ip(10), 1, 9999));
     let out = handle(&c, &mut t, &request_selecting(2, ip(10), SERVER), ctx(0));
-    assert_eq!(msg_type(&out.reply().expect("应当回 NAK").msg), MessageType::Nak);
+    assert_eq!(
+        msg_type(&out.reply().expect("应当回 NAK").msg),
+        MessageType::Nak
+    );
 }
 
 #[test]
@@ -247,7 +258,10 @@ fn renewal_preserves_the_original_created_at() {
 fn request_without_address_information_gets_nak() {
     let (c, mut t) = (cfg(), MemoryStore::new());
     let out = handle(&c, &mut t, &req(MessageType::Request, 1), ctx(0));
-    assert_eq!(msg_type(&out.reply().expect("应当回 NAK").msg), MessageType::Nak);
+    assert_eq!(
+        msg_type(&out.reply().expect("应当回 NAK").msg),
+        MessageType::Nak
+    );
 }
 
 #[test]
@@ -341,7 +355,8 @@ fn option_61_takes_precedence_over_chaddr() {
     // （PXE 固件与操作系统的常见情形）
     let id = vec![0xff, 1, 2, 3, 4];
     let mut a = req(MessageType::Discover, 1);
-    a.opts_mut().insert(DhcpOption::ClientIdentifier(id.clone()));
+    a.opts_mut()
+        .insert(DhcpOption::ClientIdentifier(id.clone()));
     let mut b = req(MessageType::Discover, 99);
     b.opts_mut().insert(DhcpOption::ClientIdentifier(id));
 
@@ -499,7 +514,10 @@ fn leases_carry_the_scope_that_issued_them() {
         },
     );
 
-    assert_eq!(t.get_by_ip(ScopeId(1), ip(10)).unwrap().scope_id, ScopeId(1));
+    assert_eq!(
+        t.get_by_ip(ScopeId(1), ip(10)).unwrap().scope_id,
+        ScopeId(1)
+    );
     assert_eq!(
         t.get_by_ip(ScopeId(2), Ipv4Addr::new(10, 20, 0, 50))
             .unwrap()
@@ -550,6 +568,7 @@ fn pxe_scope() -> Scope {
         filename: Some("bootx64.efi".into()),
         server_name: Some("tftp.lab".into()),
         next_server: Some(SERVER),
+        ..Default::default()
     });
     s
 }
@@ -658,4 +677,206 @@ fn no_boot_config_means_no_boot_options() {
     let r = out.reply().unwrap();
     assert!(r.msg.opts().get(OptionCode::BootfileName).is_none());
     assert!(r.msg.opts().get(OptionCode::ClassIdentifier).is_none());
+}
+
+// ---------- iPXE 与 UEFI HTTP Boot ----------
+
+/// HTTP Boot 固件的请求。option 60 的格式和 PXE 一样，只是换了个前缀。
+fn http_boot_req(kind: MessageType, client: u8) -> Message {
+    let mut m = req(kind, client);
+    m.opts_mut().insert(DhcpOption::ClassIdentifier(
+        b"HTTPClient:Arch:00016:UNDI:003000".to_vec(),
+    ));
+    m
+}
+
+/// 已经跑起来的 iPXE：**同时**发 option 60 = PXEClient 和 option 77 = iPXE。
+/// 前者是它继承自固件的身份，后者才是它真正的自报家门。
+fn ipxe_req(kind: MessageType, client: u8, user_class: &[u8]) -> Message {
+    let mut m = pxe_req(kind, client);
+    m.opts_mut()
+        .insert(DhcpOption::UserClass(user_class.to_vec()));
+    m
+}
+
+fn boot_scope_with(http: Option<&str>, ipxe: Option<&str>) -> Scope {
+    let mut s = pxe_scope();
+    let boot = s.boot.as_mut().unwrap();
+    boot.http_url = http.map(Into::into);
+    boot.ipxe_url = ipxe.map(Into::into);
+    s
+}
+
+fn bootfile_of(r: &lessor_core::Reply) -> Option<String> {
+    match r.msg.opts().get(OptionCode::BootfileName) {
+        Some(DhcpOption::BootfileName(v)) => Some(String::from_utf8_lossy(v).into_owned()),
+        _ => None,
+    }
+}
+
+#[test]
+fn ipxe_is_recognised_before_the_pxe_vendor_class() {
+    // iPXE 自己也发 option 60 = PXEClient:Arch:...。只按 option 60 判，
+    // 就会把它当成固件，于是又把 ipxe.efi 发回去 —— 它加载完再来问，
+    // 再被发一次，无限自举。option 77 必须先判。
+    let c = ServerConfig::new(vec![boot_scope_with(
+        None,
+        Some("http://10.0.0.1/boot.ipxe"),
+    )]);
+    let mut t = MemoryStore::new();
+
+    let m = ipxe_req(MessageType::Discover, 1, b"iPXE");
+    assert_eq!(
+        lessor_core::boot_client_of(&m),
+        lessor_core::BootClient::Ipxe
+    );
+
+    let r = handle(&c, &mut t, &m, ctx(0))
+        .reply()
+        .cloned()
+        .expect("应当回 OFFER");
+    assert_eq!(
+        bootfile_of(&r).as_deref(),
+        Some("http://10.0.0.1/boot.ipxe"),
+        "iPXE 该拿到脚本，而不是它自己"
+    );
+}
+
+#[test]
+fn ipxe_user_class_is_read_in_both_wire_forms() {
+    // RFC 3004 规定 option 77 是长度前缀串的列表，iPXE 却发裸字符串。
+    // 两种都得认，否则经过某些中继之后就识别不出来了。
+    for raw in [b"iPXE".to_vec(), vec![4, b'i', b'P', b'X', b'E']] {
+        let m = ipxe_req(MessageType::Discover, 1, &raw);
+        assert_eq!(
+            lessor_core::boot_client_of(&m),
+            lessor_core::BootClient::Ipxe,
+            "没认出 option 77: {raw:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pxe_firmware_without_user_class_is_not_mistaken_for_ipxe() {
+    let m = pxe_req(MessageType::Discover, 1);
+    assert_eq!(
+        lessor_core::boot_client_of(&m),
+        lessor_core::BootClient::Pxe
+    );
+
+    // 别的 user class 也不该被当成 iPXE
+    let m = ipxe_req(MessageType::Discover, 1, b"anaconda");
+    assert_eq!(
+        lessor_core::boot_client_of(&m),
+        lessor_core::BootClient::Pxe
+    );
+}
+
+#[test]
+fn ipxe_without_its_own_url_falls_back_to_the_default() {
+    // 没配 ipxe_url 时保持加这个特性之前的行为 —— 但这通常就是自举的配法，
+    // 文档里说明了。这里钉住行为，避免哪天悄悄变成"什么都不发"。
+    let c = ServerConfig::new(vec![boot_scope_with(None, None)]);
+    let mut t = MemoryStore::new();
+    let m = ipxe_req(MessageType::Discover, 1, b"iPXE");
+    let r = handle(&c, &mut t, &m, ctx(0)).reply().cloned().unwrap();
+    assert_eq!(bootfile_of(&r).as_deref(), Some("bootx64.efi"));
+}
+
+#[test]
+fn http_boot_gets_the_url_and_the_required_vendor_class() {
+    // UEFI 规范要求应答里带 option 60 = "HTTPClient"，固件靠它确认
+    // 这个 URL 是给自己的；不回就不会去取。
+    let c = ServerConfig::new(vec![boot_scope_with(
+        Some("http://10.0.0.1/boot.efi"),
+        None,
+    )]);
+    let mut t = MemoryStore::new();
+
+    let m = http_boot_req(MessageType::Discover, 1);
+    assert_eq!(
+        lessor_core::boot_client_of(&m),
+        lessor_core::BootClient::HttpBoot
+    );
+
+    let r = handle(&c, &mut t, &m, ctx(0)).reply().cloned().unwrap();
+    assert_eq!(bootfile_of(&r).as_deref(), Some("http://10.0.0.1/boot.efi"));
+    assert_eq!(
+        r.msg.opts().get(OptionCode::ClassIdentifier),
+        Some(&DhcpOption::ClassIdentifier(b"HTTPClient".to_vec())),
+    );
+}
+
+#[test]
+fn http_boot_gets_nothing_when_only_a_tftp_filename_is_configured() {
+    // 把 "bootx64.efi" 发给 HTTP Boot 固件没有意义 —— 它会拿去当 URL
+    // 解析然后失败。什么都不发，至少它能去试别的启动项。
+    let c = ServerConfig::new(vec![pxe_scope()]);
+    let mut t = MemoryStore::new();
+    let r = handle(&c, &mut t, &http_boot_req(MessageType::Discover, 1), ctx(0))
+        .reply()
+        .cloned()
+        .unwrap();
+
+    assert_eq!(bootfile_of(&r), None, "没有它能用的 URL 就别发引导文件");
+    assert_eq!(
+        r.msg.opts().get(OptionCode::ClassIdentifier),
+        None,
+        "没给 URL 就不该声明 HTTPClient —— 空口声明和 PXEClient 那边一样有害"
+    );
+}
+
+#[test]
+fn a_url_in_boot_file_is_usable_by_http_boot() {
+    // 只配了一个 --boot-file 但它本身就是 URL 的话，HTTP Boot 能直接用
+    let mut s = pxe_scope();
+    s.boot.as_mut().unwrap().filename = Some("http://10.0.0.1/boot.efi".into());
+    let c = ServerConfig::new(vec![s]);
+    let mut t = MemoryStore::new();
+    let r = handle(&c, &mut t, &http_boot_req(MessageType::Discover, 1), ctx(0))
+        .reply()
+        .cloned()
+        .unwrap();
+    assert_eq!(bootfile_of(&r).as_deref(), Some("http://10.0.0.1/boot.efi"));
+}
+
+#[test]
+fn long_urls_do_not_reach_the_bootp_file_field() {
+    // BOOTP 的 file 字段只有 128 字节，dhcproto 的 set_fname_str 超长会
+    // 直接 panic —— 那会打崩整个收发循环。HTTP Boot 和 iPXE 的 URL
+    // 经常超过 128 字节，所以这不是个理论问题。
+    let long = format!("http://10.0.0.1/{}/boot.efi", "x".repeat(200));
+    assert!(long.len() > 128);
+
+    let c = ServerConfig::new(vec![boot_scope_with(Some(&long), None)]);
+    let mut t = MemoryStore::new();
+    let r = handle(&c, &mut t, &http_boot_req(MessageType::Discover, 1), ctx(0))
+        .reply()
+        .cloned()
+        .unwrap();
+
+    assert_eq!(
+        bootfile_of(&r).as_deref(),
+        Some(long.as_str()),
+        "option 67 照发"
+    );
+    assert!(
+        r.msg.fname_str().is_none(),
+        "放不下就别往 BOOTP file 字段塞"
+    );
+}
+
+#[test]
+fn plain_clients_still_get_the_default_boot_file() {
+    // 不自报身份的客户端（老式 BOOTP 固件）行为不变
+    let c = ServerConfig::new(vec![boot_scope_with(
+        Some("http://x/1"),
+        Some("http://x/2"),
+    )]);
+    let mut t = MemoryStore::new();
+    let r = handle(&c, &mut t, &req(MessageType::Discover, 1), ctx(0))
+        .reply()
+        .cloned()
+        .unwrap();
+    assert_eq!(bootfile_of(&r).as_deref(), Some("bootx64.efi"));
 }

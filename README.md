@@ -21,7 +21,7 @@
 典型用途：
 
 - 机房上架时给 BMC 临时发地址，改完正式 IP 就撤
-- 装机网段的 PXE 网络引导（UEFI HTTP Boot 的客户端识别还没做，见 [docs](docs/pxe-client-identification.md#边界)）
+- 装机网段的网络引导：PXE、UEFI HTTP Boot、iPXE 链式引导
 - 隔离网络、实验环境里需要一个能随手起停的 DHCP
 
 ## 状态
@@ -136,8 +136,9 @@ docker compose -f docker/compose.yml up --abort-on-container-exit --build
 - **存储抽象** —— `LeaseStore` trait，`MemoryStore` 是内存实现，sqlite 放上层
 - **配置校验** —— 池越界、区间重叠、保留冲突、网关不在子网内等一次全部列出
 - **丢弃原因** —— 不应答时给出 `DropReason`，界面上能回答"为什么这台机器插上没反应"
-- **[PXE 客户端识别](docs/pxe-client-identification.md)** —— 从 option 60 认出网络引导中的
-  机器，原样记进租约；同一台机器在固件阶段和操作系统阶段是两条不同的记录
+- **[引导客户端识别](docs/pxe-client-identification.md)** —— 从 option 60 / option 77
+  分出 PXE 固件、UEFI HTTP Boot、iPXE 三类，各发各的引导目标；
+  同一台机器在固件阶段和操作系统阶段是两条不同的记录
 - 作用域启用/禁用；容量统计；`MacAddr` 序列化为 `"ac:1f:6b:8e:00:01"`
 
 ### 真实客户端暴露出来的问题
@@ -171,7 +172,8 @@ docker compose -f docker/compose.yml up --abort-on-container-exit --build
 - WebSocket 推送每个报文的处理结果（含丢弃原因），慢客户端只丢事件、
   永远不会拖住 DHCP 主循环
 - 无配置文件的快捷启动，含 `--reservation MAC=IP[=主机名]` 与
-  `--boot-file` / `--next-server` / `--tftp-server`
+  `--boot-file` / `--next-server` / `--tftp-server`；
+  另有 `--http-boot-url` 和 `--ipxe-url`，按客户端类别分别下发
 - 后台定期回收过期租约
 
 ### lessor-net / discovery

@@ -26,6 +26,29 @@ pub struct Reservation {
     pub hostname: Option<String>,
 }
 
+/// 客户端自报的网络引导方式。
+///
+/// 三种客户端要的东西完全不同：PXE 固件要 TFTP 上的文件名，
+/// HTTP Boot 固件要一个完整 URL，已经跑起来的 iPXE 要一个引导脚本。
+/// 发错了轻则不引导，重则无限自举（见 [`BootClient::Ipxe`]）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BootClient {
+    /// 没有自报任何引导身份 —— 普通客户端，或不发 option 60 的老固件
+    #[default]
+    Plain,
+    /// PXE 固件。option 60 以 `PXEClient` 开头
+    Pxe,
+    /// UEFI HTTP Boot 固件。option 60 以 `HTTPClient` 开头
+    HttpBoot,
+    /// 已经被引导起来的 iPXE。option 77（user class）为 `iPXE`
+    ///
+    /// **必须先于 option 60 判定**：iPXE 自己也发 `PXEClient:Arch:...`，
+    /// 只看 option 60 会把它当成固件，于是又把 `ipxe.efi` 发回去 ——
+    /// 它加载完再来问，再被发一次，无限自举。
+    Ipxe,
+}
+
 /// 网络引导参数（PXE / iPXE / UEFI HTTP Boot）。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,12 +56,56 @@ pub struct BootConfig {
     /// option 66 —— TFTP 服务器名
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub server_name: Option<String>,
-    /// option 67 —— 引导文件名
+    /// option 67 —— 引导文件名。默认值，给 PXE 固件和没自报身份的客户端。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub filename: Option<String>,
     /// siaddr 字段里的下一跳服务器
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub next_server: Option<Ipv4Addr>,
+    /// 给 UEFI HTTP Boot 客户端的引导 URL。必须是完整 URL，
+    /// 它不会去 TFTP 取文件。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub http_url: Option<String>,
+    /// 给已经跑起来的 iPXE 的引导脚本，通常是 `http://.../boot.ipxe`。
+    /// 不配的话 iPXE 会拿到和固件一样的 [`BootConfig::filename`]，
+    /// 那通常就是它自己 —— 无限自举。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ipxe_url: Option<String>,
+}
+
+impl BootConfig {
+    /// 该给这类客户端发什么。`None` 表示没有它能用的东西，
+    /// 那就干脆一个引导选项都不发 —— 发一个它用不了的比不发更糟。
+    pub fn file_for(&self, client: BootClient) -> Option<&str> {
+        match client {
+            // 已经是 iPXE 了，要的是脚本。没配就退回默认值：
+            // 行为和加这个特性之前一致，但很可能就是自举的那种配法。
+            BootClient::Ipxe => self.ipxe_url.as_deref().or(self.filename.as_deref()),
+
+            // HTTP Boot 固件只认 URL。没配专门的 URL 时，只有默认值
+            // 本身就是 URL 才能用 —— 把 TFTP 文件名发给它没有意义，
+            // 它会拿去当 URL 解析然后失败。
+            BootClient::HttpBoot => self
+                .http_url
+                .as_deref()
+                .or_else(|| self.filename.as_deref().filter(|f| looks_like_url(f))),
+
+            BootClient::Pxe | BootClient::Plain => self.filename.as_deref(),
+        }
+    }
+
+    /// 有没有配任何引导参数。
+    pub fn is_empty(&self) -> bool {
+        self.server_name.is_none()
+            && self.filename.is_none()
+            && self.next_server.is_none()
+            && self.http_url.is_none()
+            && self.ipxe_url.is_none()
+    }
+}
+
+fn looks_like_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
 }
 
 /// 配置校验发现的问题。
@@ -152,7 +219,9 @@ impl Scope {
         let bits = if self.prefix >= 32 {
             u32::MAX
         } else {
-            u32::MAX.checked_shl(32 - u32::from(self.prefix)).unwrap_or(0)
+            u32::MAX
+                .checked_shl(32 - u32::from(self.prefix))
+                .unwrap_or(0)
         };
         Ipv4Addr::from(bits)
     }
@@ -392,10 +461,11 @@ mod tests {
                 hostname: None,
             },
         ];
-        assert!(s.validate().iter().any(|e| matches!(
-            e,
-            ScopeError::DuplicateReservation { count: 2, .. }
-        )));
+        assert!(
+            s.validate()
+                .iter()
+                .any(|e| matches!(e, ScopeError::DuplicateReservation { count: 2, .. }))
+        );
     }
 
     #[test]

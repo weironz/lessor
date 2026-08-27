@@ -55,6 +55,19 @@ LESSOR_SERVER=192.168.73.1 uv run --with websockets python scripts/e2e_check.py
 
 Windows 控制台若报编码错误，加 `PYTHONIOENCODING=utf-8`。
 
+## boot_matrix.py
+
+四种引导客户端各自拿到什么，走真实 UDP socket 打一遍。单元测试是拿
+dhcproto 的结构体断言的，这个脚本覆盖编解码那一层：option 77 的两种
+线上格式、option 60 的前缀匹配、应答里 option 60 / 67 / BOOTP file
+字段的实际字节。
+
+```bash
+LESSOR_SERVER=192.168.88.1 python scripts/boot_matrix.py
+```
+
+服务端要把三个引导目标都配上，脚本开头的注释里有完整命令。
+
 ## vm_console.py
 
 抓一帧虚拟机控制台存成 PNG。固件 / PXE 阶段 guest 里没有 VMware Tools，

@@ -10,7 +10,7 @@ use dhcproto::v4::{DhcpOption, Message, MessageType, Opcode, OptionCode};
 
 use crate::addr::{ClientId, MacAddr};
 use crate::lease::{Lease, LeaseState, UnixTime};
-use crate::scope::{Scope, ScopeId};
+use crate::scope::{BootClient, Scope, ScopeId};
 use crate::store::{AllocSource, LeaseStore, allocate};
 
 /// 应答该发到哪里。RFC 2131 §4.1 规定了这套优先级。
@@ -168,6 +168,9 @@ fn hostname(msg: &Message) -> Option<String> {
     }
 }
 
+/// BOOTP `file` 字段的容量。超过就只能走 option 67。
+const BOOTP_FILE_LEN: usize = 128;
+
 /// option 60。PXE 客户端会填 `PXEClient:Arch:00007:...`，
 /// 据此可以区分固件阶段和操作系统阶段，也便于在界面上认出设备类型。
 fn vendor_class(msg: &Message) -> Option<String> {
@@ -213,9 +216,49 @@ fn base_reply(req: &Message, kind: MessageType, server_id: Ipv4Addr) -> Message 
     m
 }
 
-/// 客户端是不是 PXE 固件（option 60 以 `PXEClient` 开头）。
-fn is_pxe_client(req: &Message) -> bool {
-    vendor_class(req).is_some_and(|v| v.starts_with("PXEClient"))
+/// option 77（user class）里有没有 `iPXE`。
+///
+/// RFC 3004 规定 option 77 是"长度前缀串"的列表，但 **iPXE 直接发裸字符串**。
+/// 现实里两种都会遇到（有的中继或代理会替它重新封装），所以两种都认。
+fn user_class_has_ipxe(raw: &[u8]) -> bool {
+    const IPXE: &[u8] = b"iPXE";
+
+    if raw.eq_ignore_ascii_case(IPXE) {
+        return true;
+    }
+
+    let mut i = 0;
+    while i < raw.len() {
+        let n = raw[i] as usize;
+        // 长度为 0 或越界，说明这不是长度前缀格式，别再往下猜
+        if n == 0 || i + 1 + n > raw.len() {
+            return false;
+        }
+        if raw[i + 1..i + 1 + n].eq_ignore_ascii_case(IPXE) {
+            return true;
+        }
+        i += 1 + n;
+    }
+    false
+}
+
+/// 客户端自报的引导方式。
+///
+/// 判定顺序很重要，`BootClient::Ipxe` 的文档里写了为什么。
+pub fn boot_client_of(req: &Message) -> BootClient {
+    if let Some(DhcpOption::UserClass(raw)) = req.opts().get(OptionCode::UserClass)
+        && user_class_has_ipxe(raw)
+    {
+        return BootClient::Ipxe;
+    }
+
+    match vendor_class(req) {
+        Some(v) if v.starts_with("PXEClient") => BootClient::Pxe,
+        // UEFI 规范里 HTTP Boot 客户端自报 `HTTPClient`，后面同样跟
+        // `:Arch:xxxxx:UNDI:yyyzzz`
+        Some(v) if v.starts_with("HTTPClient") => BootClient::HttpBoot,
+        _ => BootClient::Plain,
+    }
 }
 
 /// 按作用域配置填入网络参数。
@@ -238,11 +281,21 @@ fn apply_scope_options(msg: &mut Message, req: &Message, scope: &Scope, lease_se
     }
 
     if let Some(boot) = &scope.boot {
-        if let Some(f) = &boot.filename {
+        let client = boot_client_of(req);
+
+        if let Some(f) = boot.file_for(client) {
             msg.opts_mut()
-                .insert(DhcpOption::BootfileName(f.clone().into_bytes()));
-            // 同时写进 BOOTP 的 file 字段 —— 部分固件只读这里，不看 option 67
-            msg.set_fname_str(f);
+                .insert(DhcpOption::BootfileName(f.as_bytes().to_vec()));
+
+            // 同时写进 BOOTP 的 file 字段 —— 部分固件只读这里，不看 option 67。
+            //
+            // 但这个字段只有 128 字节，而 HTTP Boot 和 iPXE 的 URL 经常更长，
+            // dhcproto 的 set_fname_str 超长会直接 panic（打崩整个收发循环）。
+            // 放不下就只发 option 67：认这个字段的都是老式 TFTP 固件，
+            // 它们的文件名本来就短，装不下的场景也用不着它。
+            if f.len() <= BOOTP_FILE_LEN {
+                msg.set_fname_str(f);
+            }
         }
         if let Some(sn) = &boot.server_name {
             msg.opts_mut()
@@ -250,6 +303,14 @@ fn apply_scope_options(msg: &mut Message, req: &Message, scope: &Scope, lease_se
         }
         if let Some(ns) = boot.next_server {
             msg.set_siaddr(ns);
+        }
+
+        // UEFI 规范要求 HTTP Boot 的应答里带 option 60 = "HTTPClient"，
+        // 固件靠它确认这个 URL 是给自己的；不回就不会去取。
+        // 只在真的给了它 URL 时才声明 —— 空口声明和 PXEClient 那边一样有害。
+        if client == BootClient::HttpBoot && boot.file_for(client).is_some() {
+            msg.opts_mut()
+                .insert(DhcpOption::ClassIdentifier(b"HTTPClient".to_vec()));
         }
 
         // option 60 = "PXEClient" 只在同时给了 PXE 厂商选项（option 43）时才回。
@@ -272,7 +333,7 @@ fn apply_scope_options(msg: &mut Message, req: &Message, scope: &Scope, lease_se
         //
         // 另：别把"固件完全不接受 OFFER、一直重发 DISCOVER"算到这一项头上，
         // 那个症状的原因是应答的**源端口**不是 67，见 lessord 的 `socket_for`。
-        if is_pxe_client(req) && scope.has_pxe_vendor_options() {
+        if client == BootClient::Pxe && scope.has_pxe_vendor_options() {
             msg.opts_mut()
                 .insert(DhcpOption::ClassIdentifier(b"PXEClient".to_vec()));
         }
@@ -399,9 +460,8 @@ fn on_request<S: LeaseStore + ?Sized>(
 
     // 客户端认为自己该拿的地址：
     // SELECTING / INIT-REBOOT 放在 option 50，RENEWING / REBINDING 放在 ciaddr。
-    let claimed = requested_ip(req).or_else(|| {
-        (!req.ciaddr().is_unspecified()).then(|| req.ciaddr())
-    });
+    let claimed =
+        requested_ip(req).or_else(|| (!req.ciaddr().is_unspecified()).then(|| req.ciaddr()));
     let Some(claimed) = claimed else {
         return nak(
             scope.id,
