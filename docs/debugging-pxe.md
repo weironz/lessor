@@ -5,7 +5,7 @@ lessor 里两个最难找的 bug（[源端口](pxe-source-port.md)、
 **普通 DHCP 客户端全部通过，只有固件不干活**。
 
 固件基本不打印任何东西，服务端日志又显示一切正常 —— 光靠这两头看不出问题。
-下面是这次真正把问题逼出来的几件工具和一条思路。
+下面是这次真正把问题逼出来的几件工具和一条思路，外加搭台子时会踩的几个坑。
 
 ## 一、先分清"包没到"和"包到了但不认"
 
@@ -46,6 +46,7 @@ python scripts/vm_console.py 5902 shot.png
 | `Fetching Netboot Image` | **DHCP 这一段已经成立**，开始走 TFTP 了 |
 | `Unable to fetch TFTP image: TFTP Error` | 地址和文件名都拿到了，是 TFTP 那头的问题 |
 | 直接回 Boot Manager | 固件压根没打算网络引导 —— 往 option 60/43 上查 |
+| `error: you need to load the kernel first.` | GRUB 已经起来了，DHCP/TFTP 都没问题 —— 是网卡型号，见下 |
 
 `Fetching Netboot Image` 出没出现，是区分 DHCP 问题和 TFTP 问题的分水岭。
 
@@ -173,6 +174,44 @@ TFTP 日志里有 `ipxe.efi`，HTTP 日志里有 `GET /boot.ipxe 200`，
 
 `sleep` 是为了让画面停住够久，好用 `vm_console.py` 抓下来 ——
 不然脚本执行完 iPXE 就退出了，截图只能拍到启动菜单。
+
+## 测试台本身的坑（虚拟机侧）
+
+下面三条不是 lessor 测出来的，是在**同一台 VMware 上跑 MAAS 装机实验室**时
+踩的。它们和 DHCP 无关，但会让人误以为是 DHCP 出了问题 —— 记在这里，
+免得下次搭台子重走一遍。
+
+**网卡型号会决定 PXE 能不能走完。** 用 e1000 / e1000e 时，DHCP 和 TFTP
+都正常，GRUB 却拉不动内核：
+
+```
+error: you need to load the kernel first.
+```
+
+HTTP 传到 250–300 KB 就断，而且**每次断的字节数还不一样**。根因是
+e1000/e1000e 的 EFI UNDI 驱动太慢，触发了 GRUB 的超时。换 vmxnet3 解决。
+
+已经排除掉的方向，省得重走：服务端 `curl` 拉同一个 URL 完整且快、
+HTTP 响应头正常、关掉 TSO/GSO/GRO 无效。
+
+真机上的对应物是 **PXE 网口的 UEFI Option ROM / 网卡固件版本**，
+不是 DHCP 服务器，也不是网络配置。
+
+**EFI NVRAM 记着上次的启动项。** 改完虚拟机配置（换网卡、改启动顺序、
+开 `networkBootProtocol`）如果不清 nvram，机器就是不按新配置网启，
+看起来像"改了没生效"。VMware 上直接删虚拟机目录下的 `nvram` 文件：
+
+```bash
+vmrun stop <vmx> hard
+rm <vm 目录>/nvram
+```
+
+真机上的对应物是 **BIOS 里的 UEFI Boot Order 被上一次安装改写过**。
+批量重装时这一步必须处理。
+
+**换网卡型号会改变 guest 里的接口名。** e1000 是 `ens33`，vmxnet3 是
+`ens192`。装机后的网络配置（netplan / curtin）别写死接口名，
+用 `match: macaddress` + `set-name` 钉住。
 
 ## 几个把人带偏的坑
 
