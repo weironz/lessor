@@ -107,6 +107,33 @@ RRQ 192.168.88.50 -> /grub/grub.cfg
 `bootx64.efi` 是 shim，它会接着去要 `grubx64.efi`，然后 GRUB 找自己的配置。
 到 GRUB 提示符就说明 DHCP 这一侧再没有可挑剔的了。
 
+## 验证 UEFI HTTP Boot
+
+VMware Workstation 的启动菜单里只有 "EFI Network"，看起来不支持 HTTP Boot ——
+其实支持，只是默认关着。vmx 里加一行，然后删掉 nvram（它记着旧的启动项）：
+
+```
+networkBootProtocol = "httpv4"
+```
+
+开了之后同一台虚拟机的固件换了身份，option 60 从 `PXEClient:Arch:00007`
+变成 `HTTPClient:Arch:00016`，走的也不再是 TFTP：
+
+```bash
+python -m http.server 80 --bind 192.168.233.1 &   # 根目录放一个真的 .efi
+
+lessord --listen 192.168.233.1 --prefix 24 \
+        --pool 192.168.233.50-192.168.233.60 \
+        --http-boot-url http://192.168.233.1/bootx64.efi
+```
+
+跑通的样子：HTTP 日志里出现 `GET /bootx64.efi 200`。没有的话，先确认
+应答里带了 `option 60 = HTTPClient` —— UEFI 规范要求有这一项，
+不回它固件就不会去取（`LESSOR_LOG=lessord=trace` 能看到实际字节）。
+
+把 `ipxe.efi` 放在 HTTP 根目录当 `bootx64.efi`，还能顺手把下一段一起验了：
+固件 HTTP 拉起 iPXE，iPXE 再走它自己的 DHCP。
+
 ## 验证 iPXE 链式引导
 
 这条链比 PXE 长一环，也更容易配错（配错的典型结果是无限自举）。
@@ -180,6 +207,7 @@ sed 's/\x1b\[[0-9;]*m//g'
 - Windows 11，lessord **普通权限**跑在 67 端口
 - VMware Workstation，UEFI 固件 + vmxnet3 网卡，VMnet1（192.168.233.0/24）
 - VMware 自带的 DHCP（`VMnetDHCP` 服务）已停，避免抢答
-- 四种客户端：busybox `udhcpc`（docker）、`systemd-networkd`（Ubuntu 24.04）、
-  VMware UEFI PXE 固件、iPXE 2.0.0+（官方 x86_64-efi 构建）
+- 五种客户端：busybox `udhcpc`（docker）、`systemd-networkd`（Ubuntu 24.04）、
+  VMware UEFI 固件的 PXE 模式与 HTTP Boot 模式（`networkBootProtocol`）、
+  iPXE 2.0.0+（官方 x86_64-efi 构建）
 - 终点：GNU GRUB 2.06 提示符 / iPXE 执行到 HTTP 上的脚本

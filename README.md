@@ -21,7 +21,7 @@
 典型用途：
 
 - 机房上架时给 BMC 临时发地址，改完正式 IP 就撤
-- 装机网段的网络引导：PXE、UEFI HTTP Boot、iPXE 链式引导
+- 装机网段的网络引导：PXE、UEFI HTTP Boot、iPXE 链式引导（三条都拿真固件验过）
 - 隔离网络、实验环境里需要一个能随手起停的 DHCP
 
 ## 状态
@@ -35,13 +35,14 @@
 - [x] Web UI —— Svelte + Vite，打包进二进制
 - [x] 桌面端 —— Tauri 套同一份 UI
 
-共 129 个测试。已用四种真实客户端验证过：
+共 129 个测试。已用五种真实客户端验证过：
 
 | 客户端 | 验到哪一步 |
 | --- | --- |
 | busybox `udhcpc`（docker） | 完整握手，Linux 的 `SO_BINDTODEVICE` 隔离路径 |
 | `systemd-networkd`（Ubuntu 24.04） | 完整握手，暴露了 DUID 形式的 option 61 |
-| VMware UEFI PXE 固件 | DHCP → TFTP → shim → GRUB 提示符 |
+| VMware UEFI 固件（PXE） | DHCP → TFTP → shim → GRUB 提示符 |
+| VMware UEFI 固件（HTTP Boot） | DHCP → HTTP `GET /bootx64.efi 200` → 执行 |
 | iPXE 2.0.0+ | 链式引导：固件拉 `ipxe.efi` → iPXE 取到 HTTP 上的脚本并执行 |
 
 ### 不需要特权

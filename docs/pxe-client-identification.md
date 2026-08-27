@@ -1,4 +1,4 @@
-# PXE 客户端识别
+# 引导客户端识别（PXE / HTTP Boot / iPXE）
 
 lessor 从 **option 60（vendor class）** 和 **option 77（user class）**
 认出客户端要哪种网络引导，分成四类（`BootClient`）：
@@ -21,7 +21,8 @@ lessor 从 **option 60（vendor class）** 和 **option 77（user class）**
 
 | 客户端 | option 60 | option 77 |
 | --- | --- | --- |
-| VMware UEFI PXE 固件 | `PXEClient:Arch:00007:UNDI:003000` | 不发 |
+| VMware UEFI 固件（PXE 模式） | `PXEClient:Arch:00007:UNDI:003000` | 不发 |
+| VMware UEFI 固件（HTTP Boot 模式） | `HTTPClient:Arch:00016:UNDI:003000` | 不发 |
 | iPXE 2.0.0+（x86_64-efi） | `PXEClient:Arch:00007:UNDI:003010` | **`iPXE`**（4 字节裸串） |
 | busybox `udhcpc` 1.37 | `udhcp 1.37.0` | 不发 |
 | `systemd-networkd`（Ubuntu 24.04） | **不发** | 不发 |
@@ -74,16 +75,21 @@ PXEClient:Arch:xxxxx:UNDI:yyyzzz
 
 ### 架构码
 
-来自 RFC 4578 的 IANA 注册表，只列常见的：
+来自 RFC 4578 的 IANA 注册表。**注意进制**：注册表里习惯写十六进制，
+而 option 60 字符串里是**十进制五位**，两者对不上号很容易看错
+（实测那台 HTTP Boot 固件报的是 `Arch:00016`，不是 `00010`）：
 
-| 码 | 含义 | 一般给什么引导文件 |
-| --- | --- | --- |
-| `00000` | Intel x86PC（传统 BIOS） | `pxelinux.0` / `lpxelinux.0` |
-| `00006` | EFI IA32 | `bootia32.efi` |
-| `00007` | **EFI BC**（EFI Byte Code） | `bootx64.efi` |
-| `00009` | EFI x86-64 | `bootx64.efi` |
-| `0000b` | EFI ARM64 | `bootaa64.efi` |
-| `00010` | UEFI HTTP Boot x86-64 | HTTP URL |
+| 注册表值 | option 60 里的写法 | 含义 | 一般给什么 |
+| --- | --- | --- | --- |
+| `0x0000` | `00000` | Intel x86PC（传统 BIOS） | `pxelinux.0` / `lpxelinux.0` |
+| `0x0006` | `00006` | EFI IA32 | `bootia32.efi` |
+| `0x0007` | `00007` | **EFI BC**（EFI Byte Code） | `bootx64.efi` |
+| `0x0009` | `00009` | EFI x86-64 | `bootx64.efi` |
+| `0x000b` | `00011` | EFI ARM64 | `bootaa64.efi` |
+| `0x0010` | `00016` | UEFI HTTP Boot x86-64 | HTTP URL |
+| `0x0013` | `00019` | UEFI HTTP Boot ARM64 | HTTP URL |
+
+option 93 里则是二进制的注册表值本身（两字节），不是这个十进制串。
 
 `00007` 名义上是 "EFI Byte Code"，但**实际上绝大多数 x86-64 UEFI 固件都报它**，
 业界一律当作"x64 UEFI"处理。MAAS 生成的 `dhcpd.conf` 里 `00:07` 和 `00:09`
@@ -194,8 +200,9 @@ iPXE 的 URL 经常更长。
 - **PXE**：拿 VMware Workstation 的真 UEFI 固件打通全程（DHCP → TFTP →
   shim → GRUB），见 [debugging-pxe.md](debugging-pxe.md)
 - **iPXE**：拿真的 iPXE 2.0.0+ 打通全程，见下面一节
-- **HTTP Boot**：**没有真固件验过** —— VMware Workstation 的 EFI 没有
-  HTTP Boot 启动项。只有单元测试加
+- **HTTP Boot**：拿真固件打通全程，见下面一节。VMware Workstation 默认
+  不开这个模式，vmx 里加一行 `networkBootProtocol = "httpv4"` 就有了
+- 三类之外还有单元测试和
   [`scripts/boot_matrix.py`](../scripts/boot_matrix.py) —— 后者走真实
   UDP socket，构造真的 option 60 / option 77 组合，检查应答里的实际字节：
 
@@ -207,9 +214,31 @@ iPXE 的 URL 经常更长。
   ✓ iPXE（长度前缀）    option67=http://.../boot.ipxe           option60=—
   ```
 
-  识别逻辑完全由请求内容决定，这一层是测到位的；HTTP Boot 没测到的是
-  "真固件会不会接受这样的应答"——[源端口那条](pxe-source-port.md)
-  就是这么漏掉的，所以如实说明。
+### HTTP Boot 实测
+
+vmx 里加 `networkBootProtocol = "httpv4"` 之后，同一台虚拟机的固件换了身份：
+
+```
+option 60 = HTTPClient:Arch:00016:UNDI:003000
+```
+
+lessor 认出 `HttpBoot`，回的是：
+
+```
+BOOTP.file = http://192.168.233.1/bootx64.efi
+option 54  = 192.168.233.1
+option 60  = HTTPClient            ← UEFI 规范要求，不回它固件不会去取
+option 67  = http://192.168.233.1/bootx64.efi
+```
+
+固件随即用 HTTP 把它取走：
+
+```
+192.168.233.50 - - "GET /bootx64.efi HTTP/1.1" 200 -
+```
+
+那次实测里 HTTP 根目录下的 `bootx64.efi` 放的其实是 iPXE，所以取走之后
+iPXE 就起来了，接着走下面 iPXE 那一段 —— 一次跑通了两条链。
 
 ### iPXE 链式引导实测
 
