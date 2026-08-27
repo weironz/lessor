@@ -21,7 +21,7 @@
 典型用途：
 
 - 机房上架时给 BMC 临时发地址，改完正式 IP 就撤
-- 装机网段的 PXE / UEFI HTTP Boot
+- 装机网段的 PXE 网络引导（UEFI HTTP Boot 的客户端识别还没做，见 [docs](docs/pxe-client-identification.md#边界)）
 - 隔离网络、实验环境里需要一个能随手起停的 DHCP
 
 ## 状态
@@ -136,7 +136,8 @@ docker compose -f docker/compose.yml up --abort-on-container-exit --build
 - **存储抽象** —— `LeaseStore` trait，`MemoryStore` 是内存实现，sqlite 放上层
 - **配置校验** —— 池越界、区间重叠、保留冲突、网关不在子网内等一次全部列出
 - **丢弃原因** —— 不应答时给出 `DropReason`，界面上能回答"为什么这台机器插上没反应"
-- **`vendor_class`（选项 60）** —— 记录并识别 PXE 客户端
+- **[PXE 客户端识别](docs/pxe-client-identification.md)** —— 从 option 60 认出网络引导中的
+  机器，原样记进租约；同一台机器在固件阶段和操作系统阶段是两条不同的记录
 - 作用域启用/禁用；容量统计；`MacAddr` 序列化为 `"ac:1f:6b:8e:00:01"`
 
 ### 真实客户端暴露出来的问题

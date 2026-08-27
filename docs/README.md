@@ -5,6 +5,9 @@
 
 ## PXE / 网络引导
 
+- [**PXE 客户端识别**](pxe-client-identification.md) ——
+  lessor 怎么从 option 60 认出网络引导中的机器，架构码怎么读，
+  同一台机器在固件阶段和操作系统阶段为什么是两条记录。
 - [**应答的源端口必须是 67**](pxe-source-port.md) ——
   服务端日志一行行"已应答"，客户端却一直重发 DISCOVER。
   普通 DHCP 客户端不校验源端口，PXE 固件校验。
