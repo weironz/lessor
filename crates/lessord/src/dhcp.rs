@@ -2,9 +2,9 @@
 //!
 //! 每个监听器一个任务，各自持有一对 socket：
 //!
-//! - **收**：绑 `0.0.0.0:67`。DHCP 请求是广播，必须绑通配地址才收得到。
-//!   Linux 上再加 `SO_BINDTODEVICE`，这样每个监听器只看见自己那块网卡上的包 ——
-//!   多网卡场景要靠它才能正确区分作用域。
+//! - **收**：怎么绑取决于平台，见 [`rx_socket`]。目标是只看见目标网卡上的包 ——
+//!   做不到隔离的话，本进程会应答本机所有网卡上的 DHCP 请求，
+//!   等于在别人的网络里放了一个流氓 DHCP 服务器。
 //! - **发**：绑到该监听器的本机地址。广播回应就只会从这块网卡出去，
 //!   不会跑到别的网段上去打扰无关设备。
 
@@ -38,13 +38,39 @@ impl Default for Ports {
     }
 }
 
-fn rx_socket(port: u16, iface: Option<&str>) -> Result<UdpSocket> {
+/// 这个监听器的收包能不能只看见目标网卡上的流量。
+///
+/// 直接关系到安全：做不到隔离时，服务进程会应答**本机所有网卡**上的
+/// DHCP 请求 —— 一台连着生产网的笔记本会就此变成一个流氓 DHCP 服务器。
+///
+/// 注意 Linux 上的隔离依赖 `SO_BINDTODEVICE`，**必须配了网卡名才成立**；
+/// 没配就和 macOS 一样是通配绑定。这个函数不能只看平台。
+pub fn rx_is_isolated(listener: &Listener) -> bool {
+    if cfg!(target_os = "windows") {
+        true // 绑本机地址即天然只收该网卡
+    } else if cfg!(target_os = "linux") {
+        listener.iface.is_some()
+    } else {
+        false
+    }
+}
+
+fn rx_socket(port: u16, server_ip: Ipv4Addr, iface: Option<&str>) -> Result<UdpSocket> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;
     sock.set_broadcast(true)?;
 
-    // 只有 Linux 有把 socket 钉在网卡上的原语。其它平台上多网卡时
-    // 无法判断包从哪块网卡进来，启动时会有告警。
+    // 三个平台各有各的做法，差别不是风格问题而是行为问题：
+    //
+    // Linux —— 绑到具体地址收不到 255.255.255.255，必须绑通配地址，
+    //   再用 SO_BINDTODEVICE 把 socket 钉在网卡上换取隔离。
+    //
+    // Windows —— 实测受限广播**会**被投递给绑定了具体网卡地址的 socket，
+    //   所以直接绑本机地址即可，天然只收这块网卡的包。
+    //   （别"顺手"改回通配：那会让本进程应答所有网卡上的 DHCP 请求。）
+    //
+    // macOS / BSD —— 与 Linux 一样收不到，却又没有 SO_BINDTODEVICE，
+    //   只能绑通配且无法隔离。启动时会告警。
     #[cfg(target_os = "linux")]
     if let Some(name) = iface {
         sock.bind_device(Some(name.as_bytes()))
@@ -53,9 +79,16 @@ fn rx_socket(port: u16, iface: Option<&str>) -> Result<UdpSocket> {
     #[cfg(not(target_os = "linux"))]
     let _ = iface;
 
-    let addr: SocketAddr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into();
-    sock.bind(&addr.into())
-        .with_context(|| format!("绑定 UDP {port} 失败（需要管理员权限，或端口被占用）"))?;
+    let bind_ip = if cfg!(target_os = "windows") {
+        server_ip
+    } else {
+        Ipv4Addr::UNSPECIFIED
+    };
+
+    let addr: SocketAddr = SocketAddrV4::new(bind_ip, port).into();
+    sock.bind(&addr.into()).with_context(|| {
+        format!("绑定 {bind_ip}:{port} 失败（需要管理员权限，或端口被占用）")
+    })?;
     sock.set_nonblocking(true)?;
     Ok(UdpSocket::from_std(sock.into())?)
 }
@@ -74,13 +107,14 @@ fn tx_socket(server_ip: Ipv4Addr) -> Result<UdpSocket> {
 
 /// 跑一个监听器，直到出错。
 pub async fn serve(state: AppState, listener: Listener, ports: Ports) -> Result<()> {
-    let rx = rx_socket(ports.server, listener.iface.as_deref())?;
+    let rx = rx_socket(ports.server, listener.server_ip, listener.iface.as_deref())?;
     let tx = tx_socket(listener.server_ip)?;
 
     info!(
         server_ip = %listener.server_ip,
         iface = listener.iface.as_deref().unwrap_or("(未绑定)"),
         port = ports.server,
+        isolated = rx_is_isolated(&listener),
         "开始监听"
     );
 

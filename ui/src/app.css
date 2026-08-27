@@ -1,0 +1,154 @@
+/* 运维工具的样式：密集、可扫读、明暗都能看。
+   颜色全部走 token，两套主题各定义一遍，不在媒体查询里直接写颜色。 */
+
+:root {
+  --bg:        #f4f6f7;
+  --panel:     #ffffff;
+  --panel-2:   #eef1f3;
+  --ink:       #151c21;
+  --ink-2:     #465561;
+  --muted:     #6b7a85;
+  --line:      #dce3e7;
+  --line-2:    #c3cfd6;
+
+  --accent:    #0e6e70;
+  --accent-bg: #e0efef;
+
+  --ok:        #25674a;
+  --ok-bg:     #e2f0e8;
+  --warn:      #8a5806;
+  --warn-bg:   #fbf1dc;
+  --danger:    #9b3227;
+  --danger-bg: #fbe9e6;
+
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  --sans: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+
+  --radius: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #0e1418;
+    --panel:     #151d22;
+    --panel-2:   #1c262c;
+    --ink:       #dbe4e8;
+    --ink-2:     #aebac2;
+    --muted:     #7f8f99;
+    --line:      #253139;
+    --line-2:    #33434d;
+
+    --accent:    #55b2b4;
+    --accent-bg: #12292a;
+
+    --ok:        #6fbf8e;
+    --ok-bg:     #14251c;
+    --warn:      #d9a441;
+    --warn-bg:   #2a2113;
+    --danger:    #e08578;
+    --danger-bg: #2c1815;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 { margin: 0; font-weight: 600; }
+
+button {
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 5px 12px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+button.primary:hover:not(:disabled) { filter: brightness(1.1); color: #fff; }
+
+button.danger { color: var(--danger); border-color: var(--danger); }
+
+select, input {
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+}
+select:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+code, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* 表格 —— 运维界面的主体 */
+.tablewrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+table { border-collapse: collapse; width: 100%; }
+th, td {
+  text-align: left;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+tbody tr:last-child td { border-bottom: 0; }
+th {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--panel-2);
+  position: sticky;
+  top: 0;
+}
+tbody tr:hover td { background: var(--panel-2); }
+
+.empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--muted);
+}
+
+/* 状态标签 */
+.pill {
+  display: inline-block;
+  font-size: 12px;
+  font-family: var(--mono);
+  padding: 1px 7px;
+  border-radius: 20px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--ink-2);
+}
+.pill.ok     { color: var(--ok);     background: var(--ok-bg);     border-color: var(--ok); }
+.pill.warn   { color: var(--warn);   background: var(--warn-bg);   border-color: var(--warn); }
+.pill.danger { color: var(--danger); background: var(--danger-bg); border-color: var(--danger); }
+.pill.accent { color: var(--accent); background: var(--accent-bg); border-color: var(--accent); }
+
+.muted { color: var(--muted); }

@@ -541,3 +541,84 @@ fn server_side_message_types_are_not_processed() {
         assert_eq!(out.drop_reason(), Some(DropReason::UnsupportedType));
     }
 }
+
+// ---------- PXE ----------
+
+fn pxe_scope() -> Scope {
+    let mut s = lab_scope();
+    s.boot = Some(lessor_core::BootConfig {
+        filename: Some("bootx64.efi".into()),
+        server_name: Some("tftp.lab".into()),
+        next_server: Some(SERVER),
+    });
+    s
+}
+
+/// 带 option 60 的 PXE 固件请求。
+fn pxe_req(kind: MessageType, client: u8) -> Message {
+    let mut m = req(kind, client);
+    m.opts_mut().insert(DhcpOption::ClassIdentifier(
+        b"PXEClient:Arch:00007:UNDI:003016".to_vec(),
+    ));
+    m
+}
+
+#[test]
+fn pxe_offer_echoes_option_60() {
+    // PXE 固件要在应答里看到 option 60 = "PXEClient" 才承认这是一台
+    // 能提供网络引导的服务器。不回这个，它会丢弃 OFFER 一直重发
+    // DISCOVER —— 现象是机器起不来，但服务端日志显示"已应答"。
+    let c = ServerConfig::new(vec![pxe_scope()]);
+    let mut t = MemoryStore::new();
+
+    let out = handle(&c, &mut t, &pxe_req(MessageType::Discover, 1), ctx(0));
+    let r = out.reply().expect("应当回 OFFER");
+    assert_eq!(
+        r.msg.opts().get(OptionCode::ClassIdentifier),
+        Some(&DhcpOption::ClassIdentifier(b"PXEClient".to_vec())),
+    );
+}
+
+#[test]
+fn pxe_offer_carries_boot_parameters() {
+    let c = ServerConfig::new(vec![pxe_scope()]);
+    let mut t = MemoryStore::new();
+    let out = handle(&c, &mut t, &pxe_req(MessageType::Discover, 1), ctx(0));
+    let r = out.reply().unwrap();
+
+    assert_eq!(
+        r.msg.opts().get(OptionCode::BootfileName),
+        Some(&DhcpOption::BootfileName(b"bootx64.efi".to_vec())),
+    );
+    assert_eq!(
+        r.msg.opts().get(OptionCode::TFTPServerName),
+        Some(&DhcpOption::TFTPServerName(b"tftp.lab".to_vec())),
+    );
+    assert_eq!(r.msg.siaddr(), SERVER, "next-server 要填进 siaddr");
+    assert_eq!(
+        r.msg.fname_str().map(|s| s.unwrap().trim_end_matches('\0')),
+        Some("bootx64.efi"),
+        "部分固件只读 BOOTP 的 file 字段，不看 option 67"
+    );
+}
+
+#[test]
+fn a_plain_client_is_not_told_about_pxe() {
+    // 普通客户端不该收到 PXEClient 标识 —— 那是给固件看的
+    let c = ServerConfig::new(vec![pxe_scope()]);
+    let mut t = MemoryStore::new();
+    let out = handle(&c, &mut t, &req(MessageType::Discover, 1), ctx(0));
+    let r = out.reply().unwrap();
+    assert!(r.msg.opts().get(OptionCode::ClassIdentifier).is_none());
+}
+
+#[test]
+fn no_boot_config_means_no_boot_options() {
+    // 作用域没配引导参数时，即使来的是 PXE 固件也不该乱发选项
+    let c = cfg();
+    let mut t = MemoryStore::new();
+    let out = handle(&c, &mut t, &pxe_req(MessageType::Discover, 1), ctx(0));
+    let r = out.reply().unwrap();
+    assert!(r.msg.opts().get(OptionCode::BootfileName).is_none());
+    assert!(r.msg.opts().get(OptionCode::ClassIdentifier).is_none());
+}

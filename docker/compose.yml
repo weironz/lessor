@@ -1,0 +1,78 @@
+# 用真实的 DHCP 客户端验证 lessord。
+#
+#   docker compose -f docker/compose.yml up --abort-on-container-exit
+#
+# lessord 在固定地址上服务，client 用 busybox 的 udhcpc 走一遍完整握手，
+# 打印它实际拿到的地址、掩码、网关、DNS。
+
+name: lessor-test
+
+services:
+  lessord:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # 需要 NET_ADMIN 才能绑 UDP 67
+    cap_add: [NET_ADMIN]
+    networks:
+      lab:
+        ipv4_address: 172.28.5.2
+    environment:
+      LESSOR_LOG: info
+    command:
+      - --listen=172.28.5.2
+      # Linux 上必须给网卡名，SO_BINDTODEVICE 才能生效
+      - --iface=eth0
+      - --prefix=24
+      - --pool=172.28.5.100-172.28.5.110
+      - --router=172.28.5.1
+      - --dns=1.1.1.1
+      - --lease-secs=600
+      - --reservation=02:42:ac:1c:05:63=172.28.5.99=fixed-client
+      - --http=0.0.0.0:8080
+    ports: ["8099:8080"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/lessord", "--version"]
+      interval: 2s
+      retries: 5
+
+  client:
+    image: busybox:1.37
+    depends_on: [lessord]
+    cap_add: [NET_ADMIN]
+    networks:
+      lab:
+        # 这个 MAC 对应上面的静态保留，应当拿到 172.28.5.99
+        ipv4_address: 172.28.5.99
+    mac_address: "02:42:ac:1c:05:63"
+    command:
+      - sh
+      - -c
+      - |
+        echo "等待 lessord 就绪..."
+        sleep 3
+        cat > /tmp/hook <<'HOOK'
+        #!/bin/sh
+        [ "$$1" = "bound" ] && {
+          echo "=========================================="
+          echo "  udhcpc 拿到地址"
+          echo "  IP      : $$ip/$$subnet"
+          echo "  网关    : $$router"
+          echo "  DNS     : $$dns"
+          echo "  租期    : ${lease}s"
+          echo "  服务器  : $$serverid"
+          echo "=========================================="
+        }
+        exit 0
+        HOOK
+        chmod +x /tmp/hook
+        udhcpc -i eth0 -s /tmp/hook -n -q -t 8 -T 2 -f -x hostname:fixed-client
+        echo "客户端结束，退出码 $$?"
+
+networks:
+  lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.5.0/24
+          gateway: 172.28.5.1

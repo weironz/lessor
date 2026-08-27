@@ -7,6 +7,7 @@ mod api;
 mod config;
 mod dhcp;
 mod state;
+mod ui;
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -54,6 +55,18 @@ struct Cli {
     /// 静态保留，形如 MAC=IP 或 MAC=IP=主机名，可重复
     #[arg(long = "reservation", value_name = "MAC=IP[=主机名]")]
     reservations: Vec<String>,
+
+    /// 引导文件名（option 67）。PXE 固件拿不到它就不会完成握手。
+    #[arg(long, value_name = "文件名")]
+    boot_file: Option<String>,
+
+    /// 引导文件所在的服务器地址，填进 siaddr
+    #[arg(long, value_name = "IP")]
+    next_server: Option<Ipv4Addr>,
+
+    /// TFTP 服务器名（option 66）
+    #[arg(long, value_name = "名称")]
+    tftp_server: Option<String>,
 
     /// 绑定到指定网卡。仅 Linux 生效，多网卡时靠它区分作用域。
     #[arg(long, value_name = "网卡名")]
@@ -107,6 +120,14 @@ impl Cli {
                     lease_secs: self.lease_secs,
                     iface: self.iface.clone(),
                     reservations,
+                    boot: (self.boot_file.is_some()
+                        || self.next_server.is_some()
+                        || self.tftp_server.is_some())
+                    .then(|| lessor_core::BootConfig {
+                        filename: self.boot_file.clone(),
+                        next_server: self.next_server,
+                        server_name: self.tftp_server.clone(),
+                    }),
                 })?
             }
         };

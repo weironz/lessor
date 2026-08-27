@@ -100,9 +100,20 @@ pub enum ClientId {
 }
 
 impl ClientId {
+    /// RFC 2132 §9.14 的硬件类型 1：以太网。
+    const HTYPE_ETHERNET: u8 = 0x01;
+
     /// 按 RFC 2131 的优先级构造：有 option 61 就用它，否则用 MAC。
+    ///
+    /// 有一处规范化很关键：绝大多数客户端（udhcpc、dhclient、各家 BMC
+    /// 固件）发的 option 61 是 `01` + 6 字节 MAC —— 即 RFC 2132 §9.14
+    /// 里"硬件类型 + 硬件地址"的形式。这与裸 MAC 指的是同一台设备，
+    /// 必须归一，否则按 MAC 配的静态保留永远匹配不上这些客户端。
     pub fn from_parts(opt61: Option<&[u8]>, mac: MacAddr) -> Self {
         match opt61 {
+            Some([Self::HTYPE_ETHERNET, rest @ ..]) if rest.len() == 6 => {
+                Self::Mac(MacAddr(rest.try_into().expect("已确认长度为 6")))
+            }
             Some(raw) if !raw.is_empty() => Self::Opt61(raw.to_vec()),
             _ => Self::Mac(mac),
         }
@@ -254,6 +265,39 @@ mod tests {
         // 空的 option 61 视同没有
         assert_eq!(ClientId::from_parts(Some(&[]), mac), ClientId::Mac(mac));
         assert_eq!(ClientId::from_parts(None, mac), ClientId::Mac(mac));
+    }
+
+    #[test]
+    fn ethernet_form_of_option_61_is_normalised_to_a_mac() {
+        // udhcpc / dhclient / 多数 BMC 固件都发这个形式：01 + MAC。
+        // 不归一的话，按 MAC 配的静态保留对它们全部失效。
+        let mac = MacAddr([0x02, 0x42, 0xac, 0x1c, 0x05, 0x63]);
+        let opt61 = [0x01, 0x02, 0x42, 0xac, 0x1c, 0x05, 0x63];
+        assert_eq!(
+            ClientId::from_parts(Some(&opt61), MacAddr::ZERO),
+            ClientId::Mac(mac),
+            "01 + MAC 应当等同于裸 MAC"
+        );
+    }
+
+    #[test]
+    fn other_option_61_forms_stay_opaque() {
+        let mac = MacAddr([1, 2, 3, 4, 5, 6]);
+        // 类型 0 表示"不是硬件地址"，内容由客户端自定，不能当 MAC 解
+        assert!(matches!(
+            ClientId::from_parts(Some(&[0x00, b'p', b'c', b'1']), mac),
+            ClientId::Opt61(_)
+        ));
+        // 长度不对的以太网类型也不归一 —— 宁可保守
+        assert!(matches!(
+            ClientId::from_parts(Some(&[0x01, 1, 2, 3]), mac),
+            ClientId::Opt61(_)
+        ));
+        // 其它硬件类型（如 InfiniBand 是 32）同样保持原样
+        assert!(matches!(
+            ClientId::from_parts(Some(&[32, 1, 2, 3, 4, 5, 6]), mac),
+            ClientId::Opt61(_)
+        ));
     }
 
     #[test]

@@ -213,8 +213,13 @@ fn base_reply(req: &Message, kind: MessageType, server_id: Ipv4Addr) -> Message 
     m
 }
 
+/// 客户端是不是 PXE 固件（option 60 以 `PXEClient` 开头）。
+fn is_pxe_client(req: &Message) -> bool {
+    vendor_class(req).is_some_and(|v| v.starts_with("PXEClient"))
+}
+
 /// 按作用域配置填入网络参数。
-fn apply_scope_options(msg: &mut Message, scope: &Scope, lease_secs: u32) {
+fn apply_scope_options(msg: &mut Message, req: &Message, scope: &Scope, lease_secs: u32) {
     let opts = msg.opts_mut();
     opts.insert(DhcpOption::AddressLeaseTime(lease_secs));
     // T1/T2 —— 不发的话客户端会自己按 0.5/0.875 推算，显式给出更可控
@@ -236,6 +241,8 @@ fn apply_scope_options(msg: &mut Message, scope: &Scope, lease_secs: u32) {
         if let Some(f) = &boot.filename {
             msg.opts_mut()
                 .insert(DhcpOption::BootfileName(f.clone().into_bytes()));
+            // 同时写进 BOOTP 的 file 字段 —— 部分固件只读这里，不看 option 67
+            msg.set_fname_str(f);
         }
         if let Some(sn) = &boot.server_name {
             msg.opts_mut()
@@ -243,6 +250,15 @@ fn apply_scope_options(msg: &mut Message, scope: &Scope, lease_secs: u32) {
         }
         if let Some(ns) = boot.next_server {
             msg.set_siaddr(ns);
+        }
+
+        // PXE 客户端要求应答里带 option 60 = "PXEClient"，以此确认
+        // "这台服务器能提供网络引导"。不回这个，固件会直接丢弃我们的
+        // OFFER 继续广播 DISCOVER —— 表现为一直起不来，但日志上看
+        // 服务端明明应答了。
+        if is_pxe_client(req) {
+            msg.opts_mut()
+                .insert(DhcpOption::ClassIdentifier(b"PXEClient".to_vec()));
         }
     }
 
@@ -316,7 +332,7 @@ fn on_discover<S: LeaseStore + ?Sized>(
 
     let mut msg = base_reply(req, MessageType::Offer, ctx.server_ip);
     msg.set_yiaddr(alloc.ip);
-    apply_scope_options(&mut msg, scope, lease_secs);
+    apply_scope_options(&mut msg, req, scope, lease_secs);
 
     Outcome::Reply(Reply {
         msg,
@@ -411,7 +427,7 @@ fn on_request<S: LeaseStore + ?Sized>(
 
     let mut msg = base_reply(req, MessageType::Ack, ctx.server_ip);
     msg.set_yiaddr(alloc.ip).set_ciaddr(req.ciaddr());
-    apply_scope_options(&mut msg, scope, lease_secs);
+    apply_scope_options(&mut msg, req, scope, lease_secs);
 
     Outcome::Reply(Reply {
         msg,
@@ -472,7 +488,7 @@ fn on_inform(scope: &Scope, req: &Message, ctx: RecvCtx) -> Outcome {
     let mut msg = base_reply(req, MessageType::Ack, ctx.server_ip);
     msg.set_yiaddr(Ipv4Addr::UNSPECIFIED)
         .set_ciaddr(req.ciaddr());
-    apply_scope_options(&mut msg, scope, scope.lease_secs);
+    apply_scope_options(&mut msg, req, scope, scope.lease_secs);
     // INFORM 的应答不能带租期
     msg.opts_mut().remove(OptionCode::AddressLeaseTime);
     msg.opts_mut().remove(OptionCode::Renewal);

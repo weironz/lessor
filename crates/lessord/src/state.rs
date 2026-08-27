@@ -68,6 +68,15 @@ pub fn reply_label(msg: &dhcproto::v4::Message) -> &'static str {
     }
 }
 
+/// NAK 里带的拒绝原因（option 56）。被拒绝时这是最该展示的信息 ——
+/// 光看到 NAK 不知道为什么，等于没有线索。
+pub fn reject_reason(msg: &dhcproto::v4::Message) -> Option<String> {
+    match msg.opts().get(dhcproto::v4::OptionCode::Message) {
+        Some(dhcproto::v4::DhcpOption::Message(m)) if !m.is_empty() => Some(m.clone()),
+        _ => None,
+    }
+}
+
 /// 客户端标识的可读形式。
 pub fn client_label(req: &dhcproto::v4::Message) -> String {
     lessor_core::server::client_id_of(req)
@@ -184,7 +193,9 @@ impl AppState {
                     result: kind,
                     scope_id: Some(r.scope_id),
                     ip: (!r.msg.yiaddr().is_unspecified()).then(|| r.msg.yiaddr()),
-                    detail: r.alloc_source.map(|s| alloc_source_text(s).to_owned()),
+                    // NAK 用拒绝原因，其余用地址是怎么选出来的
+                    detail: reject_reason(&r.msg)
+                        .or_else(|| r.alloc_source.map(|s| alloc_source_text(s).to_owned())),
                 }
             }
             Outcome::Handled(note) => PacketEvent {

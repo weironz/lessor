@@ -1,0 +1,15 @@
+[package]
+name = "discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "发现已配置静态 IP 的设备 —— DHCP 等不到的那些"
+
+[dependencies]
+lessor-core.workspace = true
+lessor-net.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true

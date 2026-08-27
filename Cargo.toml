@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/lessor-core",
+    "crates/lessor-net",
+    "crates/discovery",
     "crates/lessord",
 ]
 
@@ -13,6 +15,8 @@ license = "MIT"
 
 [workspace.dependencies]
 lessor-core = { path = "crates/lessor-core" }
+lessor-net  = { path = "crates/lessor-net" }
+discovery   = { path = "crates/discovery" }
 
 dhcproto  = "0.14"
 serde     = { version = "1", features = ["derive"] }
@@ -26,6 +30,9 @@ clap      = { version = "4", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow    = "1"
 ipnet     = { version = "2", features = ["serde"] }
+network-interface = "2"
+rust-embed = { version = "8", features = ["mime-guess"] }
+tower-http = { version = "0.7", features = ["cors"] }
 
 [profile.release]
 opt-level = "z"

@@ -106,6 +106,7 @@ impl Config {
         scope.dns = o.dns;
         scope.lease_secs = o.lease_secs;
         scope.reservations = o.reservations;
+        scope.boot = o.boot;
         // 临时场景通常希望地址尽快回收
         scope.offer_secs = 30.min(o.lease_secs);
 
@@ -133,6 +134,8 @@ pub struct Quick {
     pub lease_secs: u32,
     pub iface: Option<String>,
     pub reservations: Vec<Reservation>,
+    /// PXE / UEFI HTTP Boot 参数。不给的话不下发引导选项。
+    pub boot: Option<lessor_core::BootConfig>,
 }
 
 /// 命令行里 `192.168.88.10-192.168.88.20` 形式的区间。
@@ -179,6 +182,7 @@ mod tests {
             lease_secs: 3600,
             iface: None,
             reservations: vec![],
+            boot: None,
         })
         .unwrap()
     }

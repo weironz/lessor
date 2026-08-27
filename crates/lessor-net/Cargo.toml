@@ -1,0 +1,14 @@
+[package]
+name = "lessor-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "平台层：网卡枚举与地址配置"
+
+[dependencies]
+lessor-core.workspace = true
+network-interface.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
