@@ -55,11 +55,39 @@ LESSOR_SERVER=192.168.73.1 uv run --with websockets python scripts/e2e_check.py
 
 Windows 控制台若报编码错误，加 `PYTHONIOENCODING=utf-8`。
 
+## vm_console.py
+
+抓一帧虚拟机控制台存成 PNG。固件 / PXE 阶段 guest 里没有 VMware Tools，
+`vmrun captureScreen` 用不了，只能走 VNC。先在 .vmx 里开：
+
+```
+RemoteDisplay.vnc.enabled = "TRUE"
+RemoteDisplay.vnc.port = "5902"
+```
+
+```bash
+python scripts/vm_console.py 5902 shot.png
+```
+
+固件屏幕上那几句话是判断它走到哪一步的唯一现场，
+对照表见 [docs/debugging-pxe.md](../docs/debugging-pxe.md)。
+
+## tftpd.py
+
+临时 TFTP 服务器，只读，只实现 RRQ。lessor 本身不提供 TFTP ——
+这个脚本是用来验证它下发的 `next-server` 和引导文件名确实被固件用上了。
+
+```bash
+python scripts/tftpd.py ./tftproot 192.168.88.1
+```
+
+没有访问控制，别在生产环境用。
+
 ## 更接近真实的那一档
 
-上面两个脚本是自己拼的报文，覆盖不到真实客户端的怪癖（比如 option 61
-写成 `01+MAC`）。`docker/` 下有一套用 busybox `udhcpc` 的回归，
-跑真实客户端 + Linux 的 `SO_BINDTODEVICE` 隔离路径：
+`fake_client.py` 和 `e2e_check.py` 发的是自己拼的报文，覆盖不到真实客户端
+的怪癖（比如 option 61 写成 `01+MAC`）。`docker/` 下有一套用 busybox
+`udhcpc` 的回归，跑真实客户端 + Linux 的 `SO_BINDTODEVICE` 隔离路径：
 
 ```bash
 cd docker && docker compose up --abort-on-container-exit --build

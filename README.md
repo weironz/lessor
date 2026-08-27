@@ -35,8 +35,9 @@
 - [x] Web UI —— Svelte + Vite，打包进二进制
 - [x] 桌面端 —— Tauri 套同一份 UI
 
-共 112 个测试。已用 busybox 的 udhcpc（docker）和 VMware 的 UEFI 固件
-两种真实客户端验证过。
+共 120 个测试。已用三种真实客户端验证过：busybox `udhcpc`（docker）、
+`systemd-networkd`（Ubuntu 24.04）、VMware 的 UEFI PXE 固件 ——
+最后一种一路验到 shim → GRUB 起来。
 
 ### 不需要特权
 
@@ -140,38 +141,25 @@ docker compose -f docker/compose.yml up --abort-on-container-exit --build
 
 ### 真实客户端暴露出来的问题
 
-这几条只有拿真客户端打才会发现，单元测试想不到：
+这几条只有拿真客户端打才会发现，单元测试想不到。展开的排查过程、实测数据
+和复现步骤都在 [docs/](docs/)：
 
 - **option 61 的 `01` + MAC 形式**。udhcpc、dhclient、多数 BMC 固件发的
   客户端标识是"硬件类型 1 + 6 字节 MAC"，与裸 MAC 指同一台设备。
   不归一的话，按 MAC 配的静态保留对这些客户端**全部失效**。
-- **应答的源端口必须是 67**。RFC 2131 规定服务端从 67 发往客户端的 68。
-  dhclient、udhcpc 这类客户端不校验源端口，所以发送 socket 绑在临时端口上
-  也一路绿灯；**PXE 固件会校验**，源端口不对的 OFFER 被静默丢弃 ——
+- **[应答的源端口必须是 67](docs/pxe-source-port.md)**。普通 DHCP 客户端
+  不校验源端口，PXE 固件校验 —— 源端口不对的 OFFER 被静默丢弃，
   现象是服务端日志一行行"已应答"，客户端却一直重发 DISCOVER。
-  这也是收发必须共用一个 socket 的原因（拆成两个都绑 67 的话，Linux 上
-  单播的续租请求会落到不读包的那一个上）。
-- **只声明 option 60 = `PXEClient` 却不给 option 43，固件会不引导**。
-  声明 `PXEClient` 等于说"我提供 PXE 引导服务"，固件随即去 option 43 里
-  找引导服务器列表；找不到就停在那儿 —— 地址拿到了，TFTP 一个请求都不发。
-  VMware UEFI 固件上的三组对照：
-
-  | option 60 | option 43 | 结果 |
-  | --- | --- | --- |
-  | 无 | 无 | 正常引导 |
-  | 有 | 有 | 正常引导 |
-  | 有 | 无 | 拿到 ACK 后什么都不做 |
-
-  所以 lessor 只在配了 option 43 时才声明 option 60。不做 PXE 菜单的话，
-  siaddr + BOOTP `file` 字段就够了（isc-dhcp、dnsmasq、MAAS 的 UEFI 分支
-  都是这个行为）。引导文件名要同时写进 BOOTP 的 `file` 字段，部分固件
-  不看 option 67。
+- **[option 60 与 option 43 要么都给，要么都不给](docs/pxe-option-60-and-43.md)**。
+  只声明 `PXEClient` 却不给 option 43，固件会接受地址然后什么都不做，
+  一个 TFTP 请求都不发。引导文件名要同时写进 BOOTP 的 `file` 字段，
+  部分固件不看 option 67。
 - **Windows 上绑 `0.0.0.0` 会跨网卡应答**（见上）。
 
-上面两条都是拿 VMware Workstation 的 UEFI PXE 固件实测出来的，验证到
-固件从 lessor 拿到地址 → TFTP 拉 `bootx64.efi` → shim 拉 `grubx64.efi` →
-GRUB 起来为止。三种客户端（busybox udhcpc、systemd-networkd、UEFI PXE 固件）
-里，只有固件能暴露这两条。
+后两条是拿 VMware Workstation 的 UEFI PXE 固件实测出来的，一路验证到
+固件取址 → TFTP 拉 `bootx64.efi` → shim 拉 `grubx64.efi` → GRUB 起来。
+三种客户端（busybox udhcpc、systemd-networkd、UEFI PXE 固件）里，
+只有固件能暴露它们 —— 排查办法见 [怎么对着真固件排查 PXE](docs/debugging-pxe.md)。
 
 ### lessord 已具备
 
@@ -238,7 +226,7 @@ ui/src-tauri/    桌面外壳。纯客户端，零特权 —— 加载的就是 
 ## 开发
 
 ```bash
-cargo test        # 44 个测试
+cargo test        # 120 个测试
 cargo clippy --all-targets
 ```
 
