@@ -122,25 +122,26 @@ async fn provoke(targets: &[Ipv4Addr], bind: Ipv4Addr) -> std::io::Result<()> {
 pub async fn scan(opts: Options) -> Vec<Device> {
     let mut found: BTreeMap<Ipv4Addr, Device> = BTreeMap::new();
 
-    let mut add = |ip: Ipv4Addr, mac: Option<MacAddr>, via: Method, bmc: bool, note: Option<String>| {
-        let e = found.entry(ip).or_insert_with(|| Device {
-            ip,
-            mac: None,
-            via: Vec::new(),
-            is_bmc: false,
-            note: None,
-        });
-        if e.mac.is_none() {
-            e.mac = mac;
-        }
-        if !e.via.contains(&via) {
-            e.via.push(via);
-        }
-        e.is_bmc |= bmc;
-        if e.note.is_none() {
-            e.note = note;
-        }
-    };
+    let mut add =
+        |ip: Ipv4Addr, mac: Option<MacAddr>, via: Method, bmc: bool, note: Option<String>| {
+            let e = found.entry(ip).or_insert_with(|| Device {
+                ip,
+                mac: None,
+                via: Vec::new(),
+                is_bmc: false,
+                note: None,
+            });
+            if e.mac.is_none() {
+                e.mac = mac;
+            }
+            if !e.via.contains(&via) {
+                e.via.push(via);
+            }
+            e.is_bmc |= bmc;
+            if e.note.is_none() {
+                e.note = note;
+            }
+        };
 
     // 先记下已经在表里的 —— 这些是设备主动说过话留下的
     let before: Vec<Neighbor> = neighbor::neighbors();
@@ -191,7 +192,11 @@ pub async fn scan(opts: Options) -> Vec<Device> {
             add(
                 n.ip,
                 Some(n.mac),
-                if known { Method::Neighbor } else { Method::Probed },
+                if known {
+                    Method::Neighbor
+                } else {
+                    Method::Probed
+                },
                 false,
                 None,
             );

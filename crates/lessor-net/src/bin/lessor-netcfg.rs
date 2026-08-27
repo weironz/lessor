@@ -82,7 +82,11 @@ fn display_width(s: &str) -> usize {
 
 fn list() -> Result<(), NetError> {
     let ifs = interfaces()?;
-    let width = ifs.iter().map(|i| display_width(&i.name)).max().unwrap_or(4);
+    let width = ifs
+        .iter()
+        .map(|i| display_width(&i.name))
+        .max()
+        .unwrap_or(4);
     for i in &ifs {
         let pad = width.saturating_sub(display_width(&i.name));
         let addrs = if i.ipv4.is_empty() {
@@ -101,13 +105,7 @@ fn list() -> Result<(), NetError> {
         } else {
             "无地址"
         };
-        println!(
-            "  {}{}  {:<6}  {}",
-            i.name,
-            " ".repeat(pad),
-            mark,
-            addrs
-        );
+        println!("  {}{}  {:<6}  {}", i.name, " ".repeat(pad), mark, addrs);
     }
     Ok(())
 }

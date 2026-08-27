@@ -146,8 +146,14 @@ pub fn parse_range(s: &str) -> Result<Range> {
     let (a, b) = s
         .split_once('-')
         .with_context(|| format!("地址区间要写成 起始-结束，收到的是 {s}"))?;
-    let start: Ipv4Addr = a.trim().parse().with_context(|| format!("起始地址 {a} 不合法"))?;
-    let end: Ipv4Addr = b.trim().parse().with_context(|| format!("结束地址 {b} 不合法"))?;
+    let start: Ipv4Addr = a
+        .trim()
+        .parse()
+        .with_context(|| format!("起始地址 {a} 不合法"))?;
+    let end: Ipv4Addr = b
+        .trim()
+        .parse()
+        .with_context(|| format!("结束地址 {b} 不合法"))?;
     Range::new(start, end).with_context(|| format!("起始地址不能大于结束地址：{s}"))
 }
 
@@ -186,7 +192,10 @@ pub fn parse_reservation(s: &str) -> Result<Reservation> {
         .with_context(|| format!("保留项缺少 IP：{s}"))?;
     Ok(Reservation {
         client: lessor_core::ClientId::Mac(mac.trim().parse()?),
-        ip: ip.trim().parse().with_context(|| format!("IP {ip} 不合法"))?,
+        ip: ip
+            .trim()
+            .parse()
+            .with_context(|| format!("IP {ip} 不合法"))?,
         hostname: parts.next().map(|h| h.trim().to_owned()),
     })
 }
@@ -261,7 +270,10 @@ mod tests {
 
     #[test]
     fn option_parses_from_hex() {
-        assert_eq!(parse_option("43=060108ff").unwrap(), (43, vec![0x06, 0x01, 0x08, 0xff]));
+        assert_eq!(
+            parse_option("43=060108ff").unwrap(),
+            (43, vec![0x06, 0x01, 0x08, 0xff])
+        );
         assert_eq!(parse_option("252=").unwrap(), (252, vec![]));
         assert!(parse_option("43=abc").is_err(), "奇数长度应拒绝");
         assert!(parse_option("999=ff").is_err(), "编号超出 u8 应拒绝");

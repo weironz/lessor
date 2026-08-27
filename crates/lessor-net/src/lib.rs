@@ -84,7 +84,9 @@ impl Ipv4Cidr {
         let mask = if self.prefix >= 32 {
             u32::MAX
         } else {
-            u32::MAX.checked_shl(32 - u32::from(self.prefix)).unwrap_or(0)
+            u32::MAX
+                .checked_shl(32 - u32::from(self.prefix))
+                .unwrap_or(0)
         };
         Ipv4Addr::from(u32::from(self.addr) & mask)
     }

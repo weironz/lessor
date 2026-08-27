@@ -43,10 +43,7 @@ fn parse_line(line: &str) -> Option<Neighbor> {
             }
         }
     }
-    Some(Neighbor {
-        ip: ip?,
-        mac: mac?,
-    })
+    Some(Neighbor { ip: ip?, mac: mac? })
 }
 
 /// MAC 的形状：恰好 12 个十六进制字符，中间只允许 `:` `-` `.` 分隔。
@@ -55,8 +52,14 @@ fn parse_line(line: &str) -> Option<Neighbor> {
 /// 接口序号之类也可能凑巧被接受。
 fn looks_like_mac(s: &str) -> bool {
     let hex = s.chars().filter(|c| c.is_ascii_hexdigit()).count();
-    let seps = s.chars().filter(|c| *c == ':' || *c == '-' || *c == '.').count();
-    hex == 12 && seps > 0 && s.chars().all(|c| c.is_ascii_hexdigit() || ":-.".contains(c))
+    let seps = s
+        .chars()
+        .filter(|c| *c == ':' || *c == '-' || *c == '.')
+        .count();
+    hex == 12
+        && seps > 0
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() || ":-.".contains(c))
 }
 
 fn parse_table(text: &str) -> Vec<Neighbor> {

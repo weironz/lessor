@@ -241,7 +241,10 @@ mod tests {
             "ip: Operation not permitted",
             "RTNETLINK answers: Permission denied",
         ] {
-            assert!(looks_like_permission_error(text), "应识别为权限问题: {text}");
+            assert!(
+                looks_like_permission_error(text),
+                "应识别为权限问题: {text}"
+            );
         }
     }
 

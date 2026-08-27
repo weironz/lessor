@@ -106,7 +106,9 @@ pub async fn sweep(
     let pkt = ping(tag);
     for t in targets {
         // 发不出去的地址（比如路由不可达）跳过就好，不该中断整轮探测
-        let _ = sock.send_to(&pkt, SocketAddr::new(IpAddr::V4(*t), PORT)).await;
+        let _ = sock
+            .send_to(&pkt, SocketAddr::new(IpAddr::V4(*t), PORT))
+            .await;
     }
 
     let mut found: Vec<Responder> = Vec::new();
@@ -121,7 +123,9 @@ pub async fn sweep(
             Err(_) => break,
             Ok(Err(_)) => continue,
             Ok(Ok((n, from))) => {
-                let IpAddr::V4(addr) = from.ip() else { continue };
+                let IpAddr::V4(addr) = from.ip() else {
+                    continue;
+                };
                 let Some(pong) = parse_pong(&buf[..n]) else {
                     continue;
                 };

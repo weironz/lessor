@@ -79,8 +79,7 @@ pub fn reject_reason(msg: &dhcproto::v4::Message) -> Option<String> {
 
 /// 客户端标识的可读形式。
 pub fn client_label(req: &dhcproto::v4::Message) -> String {
-    lessor_core::server::client_id_of(req)
-        .map_or_else(|| "?".to_owned(), |c| c.to_string())
+    lessor_core::server::client_id_of(req).map_or_else(|| "?".to_owned(), |c| c.to_string())
 }
 
 pub fn drop_reason_text(r: DropReason) -> &'static str {
@@ -162,21 +161,12 @@ impl AppState {
     }
 
     /// 处理一个 DHCP 报文，返回决策结果，并把事件推给订阅者。
-    pub async fn handle_packet(
-        &self,
-        req: &dhcproto::v4::Message,
-        server_ip: Ipv4Addr,
-    ) -> Outcome {
+    pub async fn handle_packet(&self, req: &dhcproto::v4::Message, server_ip: Ipv4Addr) -> Outcome {
         let at = now();
         let mut g = self.inner.write().await;
-        let ctx = lessor_core::RecvCtx {
-            now: at,
-            server_ip,
-        };
+        let ctx = lessor_core::RecvCtx { now: at, server_ip };
         // 拆开借用：配置只读、存储可写，两者是 Inner 的不同字段
-        let Inner {
-            server, store, ..
-        } = &mut *g;
+        let Inner { server, store, .. } = &mut *g;
         let outcome = lessor_core::handle(server, store, req, ctx);
         drop(g);
 

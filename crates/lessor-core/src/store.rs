@@ -329,7 +329,10 @@ mod tests {
         l.state = LeaseState::Declined;
         l.expires_at = 3600;
         t.insert(l);
-        assert_eq!(allocate(&scope(), &t, &client(1), None, 0).unwrap().ip, ip(11));
+        assert_eq!(
+            allocate(&scope(), &t, &client(1), None, 0).unwrap().ip,
+            ip(11)
+        );
         assert_eq!(
             allocate(&scope(), &t, &client(1), None, 3600).unwrap().ip,
             ip(10)

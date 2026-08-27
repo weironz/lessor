@@ -328,7 +328,8 @@ mod tests {
     #[test]
     fn range_overlap_detection() {
         let a = Range::new(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 10)).unwrap();
-        let touching = Range::new(Ipv4Addr::new(10, 0, 0, 10), Ipv4Addr::new(10, 0, 0, 20)).unwrap();
+        let touching =
+            Range::new(Ipv4Addr::new(10, 0, 0, 10), Ipv4Addr::new(10, 0, 0, 20)).unwrap();
         let apart = Range::new(Ipv4Addr::new(10, 0, 0, 11), Ipv4Addr::new(10, 0, 0, 20)).unwrap();
         assert!(a.overlaps(&touching), "共用一个端点也算相交");
         assert!(!a.overlaps(&apart));
