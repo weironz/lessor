@@ -27,6 +27,12 @@ pub trait LeaseStore {
     /// 清掉已过期且不再需要保留的记录，返回清理条数。
     fn reap(&mut self, now: UnixTime) -> usize;
 
+    /// 删掉某个作用域的全部租约，返回条数。
+    ///
+    /// 删作用域时必须一并清掉 —— 留着会让"已用"统计和界面出现
+    /// 指向不存在作用域的幽灵记录。
+    fn clear_scope(&mut self, scope: ScopeId) -> usize;
+
     /// 该地址此刻能否给这个客户端用。默认实现对所有存储都适用。
     fn usable_by(&self, scope: ScopeId, ip: Ipv4Addr, client: &ClientId, now: UnixTime) -> bool {
         match self.get_by_ip(scope, ip) {
@@ -113,6 +119,13 @@ impl LeaseStore for MemoryStore {
         let mut v: Vec<&Lease> = self.leases.values().collect();
         v.sort_by_key(|l| (l.scope_id, l.ip));
         v
+    }
+
+    fn clear_scope(&mut self, scope: ScopeId) -> usize {
+        let before = self.leases.len();
+        self.leases.retain(|(s, _), _| *s != scope);
+        self.index.retain(|(s, _), _| *s != scope);
+        before - self.leases.len()
     }
 
     fn reap(&mut self, now: UnixTime) -> usize {

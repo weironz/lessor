@@ -12,7 +12,7 @@ use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use lessor_core::{Lease, ScopeId};
 use lessor_net::Ipv4Cidr;
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/interfaces", get(get_interfaces))
         .route("/api/discover", post(post_discover))
         .route("/api/scopes", post(post_scope))
+        .route("/api/scopes/{id}", patch(patch_scope).delete(delete_scope))
+        .route("/api/scopes/{id}/reservations", post(post_reservation))
+        .route(
+            "/api/scopes/{id}/reservations/{client}",
+            delete(delete_reservation),
+        )
         .route("/api/events", get(events))
         // 写操作的守卫。放在路由之后、fallback 之前 ——
         // 前端资源和只读接口不受影响。
@@ -176,6 +182,139 @@ async fn post_scope(State(state): State<AppState>, Json(req): Json<NewScope>) ->
         )
             .into_response(),
     }
+}
+
+// ---------- 改 / 删作用域、静态保留 ----------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopePatchReq {
+    name: Option<String>,
+    enabled: Option<bool>,
+    pool_start: Option<Ipv4Addr>,
+    pool_end: Option<Ipv4Addr>,
+    /// 显式传 null 可以清掉网关，所以是双层 Option
+    #[serde(default, deserialize_with = "double_option")]
+    router: Option<Option<Ipv4Addr>>,
+    dns: Option<Vec<Ipv4Addr>>,
+    lease_secs: Option<u32>,
+}
+
+/// 区分"字段没出现"和"字段显式为 null" —— 前者是不改，后者是清空。
+fn double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Deserialize::deserialize(de).map(Some)
+}
+
+async fn patch_scope(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    Json(req): Json<ScopePatchReq>,
+) -> Response {
+    // 地址池要么两端都给，要么都不给
+    let pool = match (req.pool_start, req.pool_end) {
+        (Some(a), Some(b)) => Some((a, b)),
+        (None, None) => None,
+        _ => {
+            return bad_request("地址池要同时给起止两端");
+        }
+    };
+
+    let patch = crate::state::ScopePatch {
+        name: req.name,
+        enabled: req.enabled,
+        pool,
+        router: req.router,
+        dns: req.dns,
+        lease_secs: req.lease_secs,
+    };
+    match state.patch_scope(ScopeId(id), patch).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(problems) => bad_request(&problems.join("；")),
+    }
+}
+
+async fn delete_scope(State(state): State<AppState>, Path(id): Path<u32>) -> Response {
+    match state.remove_scope(ScopeId(id)).await {
+        Ok(dropped) => Json(serde_json::json!({ "droppedLeases": dropped })).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(ApiError { error: e })).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NewReservation {
+    /// MAC，或 `opt61:` 前缀的原始客户端标识
+    client: String,
+    ip: Ipv4Addr,
+    hostname: Option<String>,
+}
+
+/// 解析界面传来的客户端标识。裸 MAC 是常态，option 61 形式留给
+/// systemd-networkd 那类发 DUID 的客户端。
+fn parse_client(s: &str) -> Option<lessor_core::ClientId> {
+    if let Some(hex) = s.strip_prefix("opt61:") {
+        let bytes: Option<Vec<u8>> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+            .collect();
+        return bytes
+            .filter(|b| !b.is_empty())
+            .map(lessor_core::ClientId::Opt61);
+    }
+    s.parse().ok().map(lessor_core::ClientId::Mac)
+}
+
+async fn post_reservation(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    Json(req): Json<NewReservation>,
+) -> Response {
+    let Some(client) = parse_client(&req.client) else {
+        return bad_request("客户端标识要写成 MAC（ac:1f:6b:…）或 opt61:<十六进制>");
+    };
+    let r = lessor_core::scope::Reservation {
+        client,
+        ip: req.ip,
+        hostname: req.hostname.filter(|h| !h.is_empty()),
+    };
+    match state.add_reservation(ScopeId(id), r).await {
+        Ok(()) => StatusCode::CREATED.into_response(),
+        Err(problems) => bad_request(&problems.join("；")),
+    }
+}
+
+async fn delete_reservation(
+    State(state): State<AppState>,
+    Path((id, client)): Path<(u32, String)>,
+) -> Response {
+    let Some(client) = parse_client(&client) else {
+        return bad_request("客户端标识不合法");
+    };
+    match state.remove_reservation(ScopeId(id), &client).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "没有这条保留".into(),
+            }),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(ApiError { error: e })).into_response(),
+    }
+}
+
+fn bad_request(msg: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError {
+            error: msg.to_owned(),
+        }),
+    )
+        .into_response()
 }
 
 // ---------- 状态 ----------

@@ -98,7 +98,7 @@
 
 <main>
   {#if tab === 'scopes'}
-    <Scopes scopes={state?.scopes ?? []} listeners={state?.listeners ?? []} />
+    <Scopes scopes={state?.scopes ?? []} listeners={state?.listeners ?? []} onchange={refresh} />
   {:else if tab === 'leases'}
     <Leases {leases} onchange={refresh} />
   {:else if tab === 'events'}

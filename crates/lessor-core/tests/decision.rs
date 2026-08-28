@@ -880,3 +880,56 @@ fn plain_clients_still_get_the_default_boot_file() {
         .unwrap();
     assert_eq!(bootfile_of(&r).as_deref(), Some("bootx64.efi"));
 }
+
+// ---------- 删作用域要带走它的租约 ----------
+
+#[test]
+fn clearing_a_scope_drops_its_leases_and_frees_the_client_index() {
+    // 删作用域时留着租约会让"已用"统计和界面出现指向不存在作用域的
+    // 幽灵记录；客户端索引也必须一起清，否则同一客户端换到新作用域时
+    // 会被旧索引带偏。
+    let (c, mut t) = (cfg(), MemoryStore::new());
+    handle(&c, &mut t, &req(MessageType::Discover, 1), ctx(0));
+    handle(&c, &mut t, &request_selecting(1, ip(10), SERVER), ctx(0));
+    assert_eq!(t.len(), 1);
+
+    let dropped = t.clear_scope(SID);
+    assert_eq!(dropped, 1);
+    assert!(t.all().is_empty(), "租约应当清空");
+    assert!(
+        t.get_by_client(SID, &ClientId::Mac(MacAddr(mac(1))))
+            .is_none(),
+        "客户端索引也要清，否则会留下悬空指向"
+    );
+    assert_eq!(t.used_in(SID, 0), 0);
+}
+
+#[test]
+fn clearing_one_scope_leaves_others_alone() {
+    let mut other = lab_scope();
+    other.id = ScopeId(2);
+    other.subnet = Ipv4Addr::new(10, 0, 0, 0);
+    other.pools =
+        vec![Range::new(Ipv4Addr::new(10, 0, 0, 10), Ipv4Addr::new(10, 0, 0, 12)).unwrap()];
+
+    let mut t = MemoryStore::new();
+    t.insert(bound(ip(10), 1, 9999));
+    t.insert(Lease {
+        ip: Ipv4Addr::new(10, 0, 0, 10),
+        client: ClientId::Mac(MacAddr(mac(2))),
+        scope_id: ScopeId(2),
+        state: LeaseState::Bound,
+        expires_at: 9999,
+        hostname: None,
+        vendor_class: None,
+        created_at: 0,
+        last_seen: 0,
+    });
+
+    assert_eq!(t.clear_scope(SID), 1);
+    assert_eq!(t.len(), 1, "另一个作用域的租约不该被牵连");
+    assert!(
+        t.get_by_ip(ScopeId(2), Ipv4Addr::new(10, 0, 0, 10))
+            .is_some()
+    );
+}

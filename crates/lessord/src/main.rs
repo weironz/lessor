@@ -106,6 +106,11 @@ struct Cli {
     #[arg(long)]
     serve_empty: bool,
 
+    /// 启动后自动打开浏览器指向本机控制台。
+    /// 想要"双击即用"又不装桌面端时走这条。
+    #[arg(long)]
+    open: bool,
+
     /// 管理接口的访问令牌。给了就强制校验（写操作必须带），
     /// 不给则只有本机能用（默认只听 127.0.0.1）。
     #[arg(long, value_name = "TOKEN", env = "LESSOR_TOKEN")]
@@ -113,7 +118,7 @@ struct Cli {
 }
 
 impl Cli {
-    fn into_config(self) -> Result<(Config, Ports, SocketAddr, u64, Option<String>)> {
+    fn into_config(self) -> Result<(Config, Ports, SocketAddr, u64, Option<String>, bool)> {
         let ports = Ports {
             server: self.dhcp_port,
             client: self.client_port,
@@ -171,8 +176,42 @@ impl Cli {
                 })?
             }
         };
-        Ok((cfg, ports, self.http, self.reap_secs, self.token.clone()))
+        Ok((
+            cfg,
+            ports,
+            self.http,
+            self.reap_secs,
+            self.token.clone(),
+            self.open,
+        ))
     }
+}
+
+/// 用系统默认程序打开一个 URL。
+///
+/// 不引第三方 crate：三个平台各有一条现成命令，加起来比一个依赖便宜。
+fn open_browser(url: &str) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+
+    let mut cmd = if cfg!(target_os = "windows") {
+        // 走 cmd 的 start；第一个空参数是窗口标题占位，省掉它会把 URL 当标题
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = Command::new("open");
+        c.arg(url);
+        c
+    } else {
+        let mut c = Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 #[tokio::main]
@@ -183,7 +222,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let (cfg, ports, http_addr, reap_secs, token) = Cli::parse().into_config()?;
+    let (cfg, ports, http_addr, reap_secs, token, open) = Cli::parse().into_config()?;
 
     // 非 Linux 上没有把 socket 钉在网卡上的办法，多监听器时无法判断
     // 包从哪块网卡进来，可能把请求算到错误的作用域上。
@@ -260,6 +299,15 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| format!("HTTP 监听 {http_addr} 失败"))?;
         info!(addr = %http_addr, "HTTP 接口已就绪");
+
+        if open {
+            // 监听已经建好了，这时候开浏览器不会扑空。
+            // 打不开不是致命错误 —— 地址已经打在日志里，人工点进去就是了。
+            let url = format!("http://{http_addr}/");
+            if let Err(e) = open_browser(&url) {
+                warn!(%url, error = %e, "打不开浏览器，请手工访问上面的地址");
+            }
+        }
         tasks.spawn(async move {
             if let Err(e) = axum::serve(tcp, app).await {
                 error!(error = %e, "HTTP 服务退出");

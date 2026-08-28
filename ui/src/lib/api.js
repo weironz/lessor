@@ -29,6 +29,17 @@ export const revokeLease = (scopeId, ip) =>
 export const createScope = (body) =>
   json('/api/scopes', { method: 'POST', body: JSON.stringify(body) })
 
+export const patchScope = (id, body) =>
+  json(`/api/scopes/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+
+export const deleteScope = (id) => json(`/api/scopes/${id}`, { method: 'DELETE' })
+
+export const addReservation = (id, body) =>
+  json(`/api/scopes/${id}/reservations`, { method: 'POST', body: JSON.stringify(body) })
+
+export const deleteReservation = (id, client) =>
+  json(`/api/scopes/${id}/reservations/${encodeURIComponent(client)}`, { method: 'DELETE' })
+
 export const discover = (addr, prefix, sweep = true) =>
   json('/api/discover', {
     method: 'POST',

@@ -15,6 +15,11 @@
 - `--serve-empty`：不带作用域启动（零作用域时不应答任何 DHCP 请求）
 - 写操作守卫：`Host` 必须是 IP 字面量（防 DNS rebinding）；
   配了 `--token`（或 `LESSOR_TOKEN`）时写操作需带 `Authorization: Bearer`
+- 作用域改名 / 改池 / 启停 / 删除（`PATCH`、`DELETE /api/scopes/{id}`），
+  删除时连带清掉该作用域的租约
+- 静态保留增删（`/api/scopes/{id}/reservations`）—— 现场把 BMC 钉死到
+  规划地址靠它；加保留时会顶掉压在该地址上的他人动态租约
+- `--open`：启动后自动打开浏览器指向本机控制台
 
 ### Changed
 

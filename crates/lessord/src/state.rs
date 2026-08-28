@@ -128,6 +128,17 @@ pub struct AppState {
     new_listener: Option<tokio::sync::mpsc::UnboundedSender<Listener>>,
 }
 
+/// 作用域可改的部分。`None` 表示不动这一项。
+#[derive(Debug, Default)]
+pub struct ScopePatch {
+    pub name: Option<String>,
+    pub enabled: Option<bool>,
+    pub pool: Option<(Ipv4Addr, Ipv4Addr)>,
+    pub router: Option<Option<Ipv4Addr>>,
+    pub dns: Option<Vec<Ipv4Addr>>,
+    pub lease_secs: Option<u32>,
+}
+
 /// 作用域的运行时快照，给界面用。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -361,6 +372,134 @@ impl AppState {
 
         self.emit(Event::ScopesChanged);
         Ok(id)
+    }
+
+    /// 改一个作用域的可变部分。
+    ///
+    /// 网段和监听器不给改 —— 那等于换一个作用域，让人删了重建更清楚，
+    /// 也免得改到一半和别的作用域抢监听器。
+    pub async fn patch_scope(&self, id: ScopeId, patch: ScopePatch) -> Result<(), Vec<String>> {
+        let mut g = self.inner.write().await;
+        let Some(scope) = g.server.scopes.iter_mut().find(|s| s.id == id) else {
+            return Err(vec![format!("没有 {id} 这个作用域")]);
+        };
+
+        // 改在副本上验证，通过了才落回去 —— 免得校验失败时留下半改的状态
+        let mut next = scope.clone();
+        if let Some(name) = patch.name {
+            next.name = name;
+        }
+        if let Some(enabled) = patch.enabled {
+            next.enabled = enabled;
+        }
+        if let Some((start, end)) = patch.pool {
+            let Some(range) = lessor_core::Range::new(start, end) else {
+                return Err(vec!["地址池起止顺序不对".into()]);
+            };
+            next.pools = vec![range];
+        }
+        if let Some(router) = patch.router {
+            next.router = router;
+        }
+        if let Some(dns) = patch.dns {
+            next.dns = dns;
+        }
+        if let Some(secs) = patch.lease_secs {
+            next.lease_secs = secs;
+            next.offer_secs = next.offer_secs.min(secs);
+        }
+
+        let problems: Vec<String> = next.validate().iter().map(ToString::to_string).collect();
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+        *scope = next;
+        drop(g);
+
+        self.emit(Event::ScopesChanged);
+        Ok(())
+    }
+
+    /// 删一个作用域，连同它的租约。
+    ///
+    /// 监听器留着不动：它只是"在这块网卡上收包"，没有作用域时收到的请求
+    /// 会以 NoMatchingScope 落地，界面上看得见。贸然关掉反而会让同网段
+    /// 新建的作用域收不到包。
+    pub async fn remove_scope(&self, id: ScopeId) -> Result<usize, String> {
+        let mut g = self.inner.write().await;
+        let before = g.server.scopes.len();
+        g.server.scopes.retain(|s| s.id != id);
+        if g.server.scopes.len() == before {
+            return Err(format!("没有 {id} 这个作用域"));
+        }
+        let dropped = g.store.clear_scope(id);
+        drop(g);
+
+        self.emit(Event::ScopesChanged);
+        if dropped > 0 {
+            self.emit(Event::LeasesChanged);
+        }
+        Ok(dropped)
+    }
+
+    /// 加一条静态保留。现场把 BMC 钉死到规划地址就靠它。
+    pub async fn add_reservation(
+        &self,
+        id: ScopeId,
+        r: lessor_core::scope::Reservation,
+    ) -> Result<(), Vec<String>> {
+        let mut g = self.inner.write().await;
+        let Some(scope) = g.server.scopes.iter_mut().find(|s| s.id == id) else {
+            return Err(vec![format!("没有 {id} 这个作用域")]);
+        };
+
+        let mut next = scope.clone();
+        // 同一个客户端只保留一条，重复配等于改
+        next.reservations.retain(|x| x.client != r.client);
+        next.reservations.push(r.clone());
+
+        let problems: Vec<String> = next.validate().iter().map(ToString::to_string).collect();
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+        *scope = next;
+
+        // 那个地址上如果压着别人的动态租约，先撤掉 —— 否则保留形同虚设，
+        // 客户端会一直被那条旧租约挡着拿不到规划地址
+        let evicted = g
+            .store
+            .get_by_ip(id, r.ip)
+            .is_some_and(|l| l.client != r.client)
+            .then(|| g.store.remove(id, r.ip))
+            .is_some();
+        drop(g);
+
+        self.emit(Event::ScopesChanged);
+        if evicted {
+            self.emit(Event::LeasesChanged);
+        }
+        Ok(())
+    }
+
+    /// 删一条静态保留。已经发出去的租约不动 —— 到期自然回收。
+    pub async fn remove_reservation(
+        &self,
+        id: ScopeId,
+        client: &lessor_core::ClientId,
+    ) -> Result<bool, String> {
+        let mut g = self.inner.write().await;
+        let Some(scope) = g.server.scopes.iter_mut().find(|s| s.id == id) else {
+            return Err(format!("没有 {id} 这个作用域"));
+        };
+        let before = scope.reservations.len();
+        scope.reservations.retain(|x| &x.client != client);
+        let removed = scope.reservations.len() != before;
+        drop(g);
+
+        if removed {
+            self.emit(Event::ScopesChanged);
+        }
+        Ok(removed)
     }
 
     /// 手工撤销一条租约。返回是否真的删掉了。
