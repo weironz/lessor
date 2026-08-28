@@ -35,8 +35,8 @@
 - [x] Web UI —— Svelte + Vite，打包进二进制
 - [x] 桌面端 —— Tauri 套同一份 UI
 
-路线图见 [ROADMAP.md](ROADMAP.md)，已完成的里程碑及验收证据见
-[ROADMAP-done.md](ROADMAP-done.md)。
+路线图见 [ROADMAP.md](ROADMAP.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，
+已完成里程碑的验收证据见 [ROADMAP-done.md](ROADMAP-done.md)。
 
 共 129 个测试。已用五种真实客户端验证过：
 
