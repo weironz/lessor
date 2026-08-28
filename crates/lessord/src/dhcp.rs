@@ -110,9 +110,12 @@ fn socket_for(port: u16, server_ip: Ipv4Addr, iface: Option<&str>) -> Result<Udp
 /// 而真正的原因通常是端口被别的 DHCP 服务占着。
 fn bind_failure_hint(port: u16) -> &'static str {
     if cfg!(target_os = "windows") {
-        "端口多半被占用了。常见来源：Internet Connection Sharing（网卡共享）、         VMware DHCP Service、其它 DHCP 工具。         查：Get-NetUDPEndpoint -LocalPort 67"
+        "端口多半被占用了。常见来源：Internet Connection Sharing（网卡共享）、\
+         VMware DHCP Service、其它 DHCP 工具。\
+         查：Get-NetUDPEndpoint -LocalPort 67"
     } else if port < 1024 {
-        "低端口需要权限或端口被占用。用 root 运行，或给二进制设权限后普通用户运行：         sudo setcap cap_net_bind_service+ep <lessord 路径>"
+        "低端口需要权限或端口被占用。用 root 运行，或给二进制设权限后普通用户运行：\
+         sudo setcap cap_net_bind_service+ep <lessord 路径>"
     } else {
         "端口被占用了"
     }
@@ -159,6 +162,15 @@ pub async fn serve(state: AppState, listener: Listener, ports: Ports) -> Result<
                 continue;
             }
         };
+
+        // 我们自己那个"同网段还有没有别的 DHCP"的探测包也会广播到自己头上。
+        // 应答它是纯浪费：白占池里一个地址直到 OFFER 过期，还在界面上留下
+        // 一条根本不存在的客户端记录。别人家的服务器该答就答，那是探测生效的
+        // 方式；答自己没有任何意义。
+        if req.chaddr().starts_with(&crate::conflict::PROBE_MAC) {
+            trace!("忽略自己的冲突探测包");
+            continue;
+        }
 
         // 客户端不认应答时，光看"已应答"那一行没用 —— 得逐字段对。
         // 放在 trace 级：RUST_LOG=lessord::dhcp=trace 打开。

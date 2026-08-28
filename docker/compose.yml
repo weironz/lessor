@@ -59,7 +59,9 @@ services:
           echo "  IP      : $$ip/$$subnet"
           echo "  网关    : $$router"
           echo "  DNS     : $$dns"
-          echo "  租期    : ${lease}s"
+          # $$ 是必须的：单个 $ 会被 compose 自己当变量替换掉，
+          # 于是这里印出来的是空字符串，租期这项等于没验
+          echo "  租期    : $${lease}s"
           echo "  服务器  : $$serverid"
           echo "=========================================="
         }

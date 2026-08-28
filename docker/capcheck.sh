@@ -3,7 +3,12 @@
 #
 # 跑法（阈值必须显式设成 1024，见下）：
 #   docker build -t lessor-cap -f Dockerfile .
-#   docker run --rm --sysctl net.ipv4.ip_unprivileged_port_start=1024 #       -v "$PWD/capcheck.sh":/capcheck.sh:ro lessor-cap sh /capcheck.sh
+#   docker run --rm --entrypoint sh \
+#       --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
+#       -v "$PWD/capcheck.sh":/capcheck.sh:ro lessor-cap /capcheck.sh
+#
+# --entrypoint sh 是必须的：镜像的 ENTRYPOINT 是 lessord 本身，
+# 不覆盖的话脚本路径会被当成 lessord 的参数，直接被参数解析拒掉。
 #
 # 为什么要显式设阈值：Docker Desktop 的内核把
 # ip_unprivileged_port_start 设成了 0，也就是谁都能绑 67 —— 不设的话

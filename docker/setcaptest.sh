@@ -3,7 +3,13 @@
 #
 # 跑法（阈值必须显式设成 1024）：
 #   docker build -t lessor-cap -f Dockerfile .
-#   docker run --rm --cap-add NET_BIND_SERVICE --cap-add NET_RAW #       --sysctl net.ipv4.ip_unprivileged_port_start=1024 #       -v "$PWD/setcaptest.sh":/setcaptest.sh:ro lessor-cap sh /setcaptest.sh
+#   docker run --rm --entrypoint sh \
+#       --cap-add NET_BIND_SERVICE --cap-add NET_RAW \
+#       --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
+#       -v "$PWD/setcaptest.sh":/setcaptest.sh:ro lessor-cap /setcaptest.sh
+#
+# --entrypoint sh 是必须的：镜像的 ENTRYPOINT 是 lessord 本身，
+# 不覆盖的话脚本路径会被当成 lessord 的参数。
 #
 # --cap-add 是故意加上的：要测的正是"docker --cap-add 加上非 root 身份
 # 够不够"。答案是不够 —— --cap-add 只放进 bounding set，非 root 进程的

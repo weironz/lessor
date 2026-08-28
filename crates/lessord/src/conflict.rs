@@ -155,6 +155,12 @@ pub async fn sweeper(state: crate::state::AppState, occupied: Occupied, every: D
 const FOREIGN_SERVER_PORT: u16 = 67;
 const FOREIGN_CLIENT_PORT: u16 = 68;
 
+/// 探测包用的 MAC。本地管理位（第一字节 bit 1）置位，不会和真实网卡撞车。
+///
+/// 收包侧也认它 —— 广播出去的探测包会回到我们自己的监听器上，
+/// 答它等于白占一个地址，见 `dhcp.rs` 里的过滤。
+pub const PROBE_MAC: [u8; 6] = [0x02, b'l', b'e', b's', b's', 0x01];
+
 /// 建一个"以客户端身份收包"的 socket。
 ///
 /// 单独抽出来是因为端口的选择就是这里唯一容易错、且错了会静默的地方。
@@ -194,11 +200,8 @@ fn probe_socket(bind: Ipv4Addr, client_port: u16) -> Result<tokio::net::UdpSocke
 pub async fn detect_foreign_servers(bind: Ipv4Addr, wait: Duration) -> Result<Vec<Ipv4Addr>> {
     let sock = probe_socket(bind, FOREIGN_CLIENT_PORT)?;
 
-    // 用一个不会和真实客户端撞车的 MAC（本地管理位置 1），
-    // 免得别的服务器给我们真发一个地址出来占着池子
-    let mac = [0x02, b'l', b'e', b's', b's', 0x01];
     let xid = 0x1e55_0001_u32;
-    let probe = discovery::dhcp_discover(xid, mac);
+    let probe = discovery::dhcp_discover(xid, PROBE_MAC);
     sock.send_to(&probe, ("255.255.255.255", FOREIGN_SERVER_PORT))
         .await
         .context("发不出探测报文")?;
