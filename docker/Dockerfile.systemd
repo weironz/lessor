@@ -1,0 +1,34 @@
+# 验证 `lessord --install-service` 的成功路径。
+#
+# 这条路径此前一次都没跑过 —— M6 只验了"权限不足时报错正确"，
+# 真正装上去、开机自启、崩溃拉起、干净卸载这一串全是纸面上的。
+# 常驻是产品的核心定位，这块不能只靠读代码。
+#
+# 需要一个真的 systemd（PID 1），所以不能用普通镜像。
+#
+#   cargo zigbuild -p lessord --release --target x86_64-unknown-linux-gnu
+#   cp target/x86_64-unknown-linux-gnu/release/lessord docker/
+#   docker build -t lessor-systemd -f docker/Dockerfile.systemd docker/
+#   docker run -d --name lessor-svc --privileged --cgroupns=host \
+#       -v /sys/fs/cgroup:/sys/fs/cgroup:rw lessor-systemd
+#
+# --privileged 是 systemd 在容器里跑起来的代价。这只是测试台，不是发布形态。
+FROM debian:trixie-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv iproute2 libcap2-bin procps ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ # 容器里这些单元没有意义，留着只会让 systemd 报一堆无关的失败，
+ # 把我们要看的东西淹掉
+ && rm -f /lib/systemd/system/multi-user.target.wants/* \
+          /etc/systemd/system/*.wants/* \
+          /lib/systemd/system/local-fs.target.wants/* \
+          /lib/systemd/system/sockets.target.wants/*udev* \
+          /lib/systemd/system/basic.target.wants/*
+
+COPY lessord /usr/local/bin/lessord
+
+# systemd 靠这个信号做有序关机
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
