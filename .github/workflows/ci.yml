@@ -51,3 +51,18 @@ jobs:
 
       - name: 测试
         run: cargo test --workspace
+
+  # 依赖树的策略检查：已知漏洞、许可证、来源。策略在 deny.toml，每条都写了理由。
+  #
+  # 单开一个 job 而不是塞进 check：它和平台无关（读的是 Cargo.lock，不编译），
+  # 跑两遍是浪费；而且它红的时候原因和"代码有问题"完全不同，分开看更清楚。
+  #
+  # 不需要 bun —— cargo metadata 不碰 ui/dist。
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features

@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# 不往 crates.io 发。这些 crate 是一个应用的组成部分，互相之间用 path
+# 依赖（没有版本号）—— 发布出去别人是解析不了的。标死了也顺带防住误
+# `cargo publish`。将来真要把 lessor-core 单独发出去，先给它换成带版本号
+# 的依赖声明。
+publish = false
 description = "DHCPv4 服务端核心逻辑：地址池、租约状态机、报文决策。无 IO、无 async。"
 
 [dependencies]

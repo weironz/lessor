@@ -188,6 +188,20 @@ jobs:
           test -n "$(ls dist/*.tar.gz)"    || { echo "::error::缺 Linux 压缩包"; exit 1; }
           test -n "$(ls dist/*.zip)"       || { echo "::error::缺 Windows 压缩包"; exit 1; }
 
+      # 客户的安全扫描要一份物料清单。给源码目录生成 ——
+      # 这样 Rust 依赖（Cargo.lock）和前端依赖（bun.lock）都在一份里，
+      # 只扫二进制的话前端那半就漏了。
+      - uses: actions/checkout@v4
+        with:
+          path: src
+      - name: 生成 SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: src
+          format: spdx-json
+          artifact-name: lessor-${{ github.ref_name }}.spdx.json
+          output-file: dist/lessor-${{ github.ref_name }}.spdx.json
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
