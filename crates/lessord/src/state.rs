@@ -314,7 +314,7 @@ impl AppState {
                     .filter(lessor_net::Interface::is_servable)
                     .find_map(|i| {
                         let cidr = i.primary_ipv4()?;
-                        scope.contains(cidr.addr).then(|| (i.name, cidr.addr))
+                        scope.contains(cidr.addr).then_some((i.name, cidr.addr))
                     })
             }) {
                 Some((iface, server_ip)) => {
