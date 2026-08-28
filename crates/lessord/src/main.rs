@@ -6,6 +6,7 @@
 mod api;
 mod config;
 mod dhcp;
+mod service;
 mod sqlite;
 mod state;
 mod ui;
@@ -117,6 +118,15 @@ struct Cli {
     #[arg(long, value_name = "路径")]
     lease_db: Option<PathBuf>,
 
+    /// 注册成系统服务（systemd / Windows 服务）后退出。
+    /// 其余参数会被记进服务的启动命令行。
+    #[arg(long)]
+    install_service: bool,
+
+    /// 注销系统服务后退出。
+    #[arg(long)]
+    uninstall_service: bool,
+
     /// 管理接口的访问令牌。给了就强制校验（写操作必须带），
     /// 不给则只有本机能用（默认只听 127.0.0.1）。
     #[arg(long, value_name = "TOKEN", env = "LESSOR_TOKEN")]
@@ -132,6 +142,7 @@ struct Started {
     token: Option<String>,
     open: bool,
     lease_db: Option<PathBuf>,
+    config_path: Option<PathBuf>,
 }
 
 impl Cli {
@@ -201,6 +212,7 @@ impl Cli {
             token: self.token.clone(),
             open: self.open,
             lease_db: self.lease_db.clone(),
+            config_path: self.config.clone(),
         })
     }
 }
@@ -240,6 +252,20 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // 服务注册是一次性动作，装完就退，不进主循环
+    let cli = Cli::parse();
+    if cli.uninstall_service {
+        return service::uninstall();
+    }
+    if cli.install_service {
+        // 把除 --install-service 之外的参数原样传给服务
+        let args: Vec<String> = std::env::args()
+            .skip(1)
+            .filter(|a| a != "--install-service")
+            .collect();
+        return service::install(&args);
+    }
+
     let Started {
         cfg,
         ports,
@@ -248,7 +274,8 @@ async fn main() -> Result<()> {
         token,
         open,
         lease_db,
-    } = Cli::parse().into_config()?;
+        config_path,
+    } = cli.into_config()?;
 
     // 非 Linux 上没有把 socket 钉在网卡上的办法，多监听器时无法判断
     // 包从哪块网卡进来，可能把请求算到错误的作用域上。
@@ -280,7 +307,8 @@ async fn main() -> Result<()> {
 
     let mut state = AppState::new(cfg.clone())
         .with_token(token)
-        .with_listener_spawner(new_listener_tx);
+        .with_listener_spawner(new_listener_tx)
+        .with_config_path(config_path);
 
     if let Some(path) = &lease_db {
         let store = sqlite::SqliteStore::open(path)

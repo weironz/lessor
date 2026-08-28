@@ -7,14 +7,6 @@
 两种运行形态：**现场**（field，笔记本临时用）与**常驻**（resident，长期服务）。
 标注在各条目上。
 
-## M6 · 常驻化（常驻）
-
-- systemd unit + Windows 服务注册；`--config` 一等公民 + 平滑重载
-- 结构化日志；`/metrics`（Prometheus 文本格式）
-
-**验收**：注册为系统服务后开机自启、崩溃自拉起；周级连续运行无泄漏无重启；
-配置变更全部在线生效。
-
 ## M7 · 冲突检测与共存（共用）
 
 - OFFER 前对候选地址做 ARP/UDP 探测（Windows 走 `SendARP`，不需要 raw socket），

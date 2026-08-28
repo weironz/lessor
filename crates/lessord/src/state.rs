@@ -197,6 +197,26 @@ struct Inner {
     store: Store,
 }
 
+/// 运行计数。常驻部署要能回答"它到底在干活吗" ——
+/// 日志会滚掉，这些数字不会。
+#[derive(Debug, Default)]
+pub struct Counters {
+    pub packets: std::sync::atomic::AtomicU64,
+    pub offers: std::sync::atomic::AtomicU64,
+    pub acks: std::sync::atomic::AtomicU64,
+    pub naks: std::sync::atomic::AtomicU64,
+    pub drops: std::sync::atomic::AtomicU64,
+}
+
+impl Counters {
+    fn bump(c: &std::sync::atomic::AtomicU64) {
+        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn get(c: &std::sync::atomic::AtomicU64) -> u64 {
+        c.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<RwLock<Inner>>,
@@ -208,6 +228,10 @@ pub struct AppState {
     /// 运行时新增监听器的请求出口。界面上建完作用域后，得真的有人在
     /// 那块网卡上收包，否则作用域建了也是摆设。
     new_listener: Option<tokio::sync::mpsc::UnboundedSender<Listener>>,
+    /// 配置文件路径。给了的话，界面上的每次改动都会写回去 ——
+    /// 常驻服务重启后配置还在，否则界面改的东西活不过一次重启。
+    config_path: Option<Arc<std::path::Path>>,
+    pub counters: Arc<Counters>,
 }
 
 /// 作用域可改的部分。`None` 表示不动这一项。
@@ -287,6 +311,43 @@ impl AppState {
             started_at: now(),
             token: None,
             new_listener: None,
+            config_path: None,
+            counters: Arc::new(Counters::default()),
+        }
+    }
+
+    /// 让配置改动写回这个文件。常驻部署应当给上。
+    #[must_use]
+    pub fn with_config_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.config_path = path.map(Into::into);
+        self
+    }
+
+    /// 把当前配置写回文件。
+    ///
+    /// 先写临时文件再原子改名 —— 直接覆盖的话，写到一半掉电会留下
+    /// 半个 JSON，下次启动直接起不来。
+    async fn persist(&self) {
+        let Some(path) = &self.config_path else {
+            return;
+        };
+        let g = self.inner.read().await;
+        let cfg = Config {
+            listeners: g.listeners.clone(),
+            scopes: g.server.scopes.clone(),
+        };
+        drop(g);
+
+        let Ok(text) = serde_json::to_string_pretty(&cfg) else {
+            tracing::error!("配置无法序列化，改动没有写回文件");
+            return;
+        };
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, text.as_bytes())
+            .and_then(|()| std::fs::rename(&tmp, path.as_ref()))
+        {
+            tracing::error!(path = %path.display(), error = %e,
+                "配置写回失败 —— 界面上的改动重启后会丢");
         }
     }
 
@@ -318,6 +379,18 @@ impl AppState {
         let Inner { server, store, .. } = &mut *g;
         let outcome = lessor_core::handle(server, store, req, ctx);
         drop(g);
+
+        Counters::bump(&self.counters.packets);
+        match &outcome {
+            Outcome::Reply(r) => match reply_label(&r.msg) {
+                "OFFER" => Counters::bump(&self.counters.offers),
+                "ACK" => Counters::bump(&self.counters.acks),
+                "NAK" => Counters::bump(&self.counters.naks),
+                _ => {}
+            },
+            Outcome::Drop(_) => Counters::bump(&self.counters.drops),
+            Outcome::Handled(_) => {}
+        }
 
         let request = request_label(req);
         let client = client_label(req);
@@ -394,6 +467,73 @@ impl AppState {
             .collect()
     }
 
+    /// Prometheus 文本格式的指标。
+    ///
+    /// 不引 prometheus crate：就这几个计数器，手写比多一个依赖便宜，
+    /// 格式也简单到不会写错。
+    pub async fn metrics(&self) -> String {
+        use std::fmt::Write;
+        let c = &self.counters;
+        let scopes = self.scope_status().await;
+        let mut out = String::new();
+
+        let counters = [
+            (
+                "lessor_packets_total",
+                "收到并处理的 DHCP 报文数",
+                Counters::get(&c.packets),
+            ),
+            (
+                "lessor_offers_total",
+                "发出的 OFFER 数",
+                Counters::get(&c.offers),
+            ),
+            ("lessor_acks_total", "发出的 ACK 数", Counters::get(&c.acks)),
+            ("lessor_naks_total", "发出的 NAK 数", Counters::get(&c.naks)),
+            (
+                "lessor_drops_total",
+                "未应答的报文数",
+                Counters::get(&c.drops),
+            ),
+        ];
+        for (name, help, v) in counters {
+            let _ = writeln!(out, "# HELP {name} {help}");
+            let _ = writeln!(out, "# TYPE {name} counter");
+            let _ = writeln!(out, "{name} {v}");
+        }
+
+        let _ = writeln!(out, "# HELP lessor_uptime_seconds 进程已运行时长");
+        let _ = writeln!(out, "# TYPE lessor_uptime_seconds gauge");
+        let _ = writeln!(
+            out,
+            "lessor_uptime_seconds {}",
+            now().saturating_sub(self.started_at)
+        );
+
+        // 按作用域的容量与占用 —— 告警最常用的就是"池要满了"
+        let _ = writeln!(out, "# HELP lessor_scope_capacity 作用域可分配地址总数");
+        let _ = writeln!(out, "# TYPE lessor_scope_capacity gauge");
+        for s in &scopes {
+            let _ = writeln!(
+                out,
+                "lessor_scope_capacity{{scope=\"{}\"}} {}",
+                s.name.replace('"', "'"),
+                s.capacity
+            );
+        }
+        let _ = writeln!(out, "# HELP lessor_scope_used 作用域已占用地址数");
+        let _ = writeln!(out, "# TYPE lessor_scope_used gauge");
+        for s in &scopes {
+            let _ = writeln!(
+                out,
+                "lessor_scope_used{{scope=\"{}\"}} {}",
+                s.name.replace('"', "'"),
+                s.used
+            );
+        }
+        out
+    }
+
     pub async fn listeners(&self) -> Vec<Listener> {
         self.inner.read().await.listeners.clone()
     }
@@ -462,6 +602,7 @@ impl AppState {
             let _ = tx.send(l);
         }
 
+        self.persist().await;
         self.emit(Event::ScopesChanged);
         Ok(id)
     }
@@ -508,6 +649,7 @@ impl AppState {
         *scope = next;
         drop(g);
 
+        self.persist().await;
         self.emit(Event::ScopesChanged);
         Ok(())
     }
@@ -527,6 +669,7 @@ impl AppState {
         let dropped = g.store.clear_scope(id);
         drop(g);
 
+        self.persist().await;
         self.emit(Event::ScopesChanged);
         if dropped > 0 {
             self.emit(Event::LeasesChanged);
@@ -566,6 +709,7 @@ impl AppState {
             .is_some();
         drop(g);
 
+        self.persist().await;
         self.emit(Event::ScopesChanged);
         if evicted {
             self.emit(Event::LeasesChanged);
@@ -589,6 +733,7 @@ impl AppState {
         drop(g);
 
         if removed {
+            self.persist().await;
             self.emit(Event::ScopesChanged);
         }
         Ok(removed)

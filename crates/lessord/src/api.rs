@@ -26,6 +26,7 @@ use crate::ui::Assets;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics))
         .route("/api/state", get(get_state))
         .route("/api/leases", get(get_leases))
         .route("/api/leases/{scope_id}/{ip}", delete(revoke_lease))
@@ -50,6 +51,16 @@ pub fn router(state: AppState) -> Router {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// Prometheus 抓取端点。和管理接口同一个监听地址 ——
+/// 默认只听 127.0.0.1，要被 Prometheus 抓就得显式 `--http 0.0.0.0:8080`。
+async fn metrics(State(state): State<AppState>) -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.metrics().await,
+    )
+        .into_response()
 }
 
 // ---------- 写操作守卫 ----------
