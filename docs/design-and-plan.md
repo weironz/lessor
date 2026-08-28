@@ -107,6 +107,42 @@ DHCPv6 不在当前阶段 —— 列入 v1.x 路线图，不再当"永久非目�
 - **不移植代码**：C++/常驻架构与本项目的语言和形态都不匹配 —— 把它的架构
   搬过来，等于把我们刻意避开的复杂度请回来。
 
+### Kea 为什么不做 Windows、UI 为什么在体外
+
+这两个"为什么"值得单独记下 —— 它们解释了空档为什么是结构性的、短期不会被 ISC 填上。
+
+**不做 Windows 是三层原因叠加的**：
+
+1. **技术根**：Kea 官方定位就是"任何 POSIX 兼容系统"。整套形态是 Unix 的 ——
+   多进程 daemon（dhcp4/dhcp6/ddns/ctrl-agent 各一个）、控制通道是 Unix domain
+   socket、keactrl shell 脚本管进程；底层收发用 raw socket（Linux LPF / BSD BPF），
+   而 Windows 从 XP SP2 起阉割了原生 raw socket，要等价实现只能上 Npcap/NDIS
+   驱动这个深坑。lessor 在 Windows 上绕开它的方式（绑具体地址 + 广播应答，实测
+   受限广播会投递）正是这道移植墙的另一侧。
+2. **组织与成本**：ISC 是小型非营利，且有明确前科 —— BIND 9 曾支持 Windows，
+   2021-04 宣布弃用、9.18 起彻底移除，官方理由：VS 不支持其依赖的 C11 特性、
+   **没有任何开发者用 Windows**、向付费支持客户征询后**收到零个保留请求**、
+   还有 WSL2 可用。Kea 从 BIND 10 遗产起家，第一天就没做 Windows。
+3. **市场**：Windows 企业环境的 DHCP 位置被微软自家 Windows Server DHCP
+   （AD 集成、许可内免费）占死，ISC 的付费客户全是 Linux 基础设施 ——
+   投入产出为负。但微软只占了 Server SKU：**Win11 客户端 + 现场场景无人服务**，
+   这正是 lessor 的入口。
+
+**UI 不是没有，是拆成了独立的集中管理平面**：Kea daemon 本体零 UI，配置是
+JSON 文件 + REST 控制通道（kea-ctrl-agent）；ISC 另有开源产品 **Stork** ——
+server-agent 架构，每台 Kea 机器装 stork-agent，中央 stork-server + PostgreSQL
++ Web 界面，集成 Prometheus/Grafana。他们的用户是"管一群 DHCP 服务器的运维
+团队"，UI 的自然形态是中央控制台，不是每实例一个网页。
+
+**对本方案的两条印证**：
+
+- Windows 空档是技术（raw socket 层）、组织（ISC 无人用 Windows）、市场
+  （微软占位但不覆盖客户端 SKU）三重叠加的结构性空档 —— 其中技术那层
+  lessor 已实测解决。
+- Stork 恰好是决策二翻盘条件的参考实现：**当产品变成"管一群实例"时 UI 才
+  拆出去**（server-agent 形态）；单实例阶段内嵌 UI 是对的。真到那一步，
+  照着 Kea + Stork 的形态拆即可。
+
 ## 三、决策一：要不要 Web 端 + 桌面端
 
 **结论：都要，但只写一份 UI。** Web 界面（嵌在 lessord 里）是本体，
