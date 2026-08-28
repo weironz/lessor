@@ -8,6 +8,16 @@
 
 ## [Unreleased]
 
+尚无变化。
+
+## [0.0.3] - 2026-08-28
+
+这一版把服务从"能发地址"推到"能放着不管"：运行时改配置、租约落盘、
+注册成系统服务、不发别人占着的地址、现场出问题时自己说清楚该查什么。
+
+仍是 0.0.x —— `v0.1` 的门槛是真机 BMC 验证（ROADMAP 的 M9），还没过。
+现有的客户端矩阵是 VMware 固件 + Linux 客户端 + 真 iPXE，没有任何一台真 BMC。
+
 ### Added
 
 - 界面上新建作用域（`POST /api/scopes`），建完自动在对应网卡起监听器 ——
@@ -125,6 +135,7 @@
   （`registry.cn-shenzhen.aliyuncs.com/willspace/lessord`）镜像；
   NSIS 桌面安装程序；Linux / Windows 命令行压缩包
 
-[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.2...HEAD
+[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.3...HEAD
+[0.0.3]: https://github.com/weironz/lessor/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/weironz/lessor/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/weironz/lessor/releases/tag/v0.0.1
