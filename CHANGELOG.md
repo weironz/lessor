@@ -22,6 +22,12 @@
   策略在 [deny.toml](deny.toml)，每条都写了理由
 - 发布物增加 SBOM（SPDX，含 Rust 与前端两侧依赖），供客户的安全扫描使用
 
+- **systemd 服务不再以 root 运行**：专用 `lessord` 用户 + 只保留
+  `CAP_NET_BIND_SERVICE` + 一组 systemd 沙箱。租约库与配置文件放
+  `/var/lib/lessord`（由 systemd 建好并归属给服务用户）——
+  配置写回需要父目录写权限，所以这些文件必须在服务自己拥有的目录里；
+  不在的话注册时会明确拒绝并说清怎么放
+
 ### Fixed
 
 - **`--install-service` 带相对路径必然坏掉。** 服务的工作目录不是你注册时

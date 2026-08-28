@@ -69,13 +69,6 @@ DHCP 靠广播工作，过不去三层 —— Tailscale / VPN 连过去是发不
 
 - WebSocket 事件带 `vendor_class`（实时日志里认出设备类型）
 - 租约行放 `http://<租约IP>` 链接（BMC 尾环的附带能力形态）
-- **systemd 服务降权**（现在以 root 跑）。项目一直讲"lessord 不需要特权"，
-  但生成的 unit 里没有 `User=`，所以实际是 root —— 那行
-  `AmbientCapabilities=CAP_NET_BIND_SERVICE` 因此是空转的。
-  卡在一件事上：降权就得让那个用户读写得了 `--config` / `--lease-db`
-  指向的路径，而那两个路径是管理员自己给的，我们无从假设。
-  可能的做法：建系统用户 + `StateDirectory=lessord`，并在路径不在状态目录
-  下时明确报错（现在有了装完即验，这类问题会当场暴露，风险比以前小）。
 
 ## 已否决
 

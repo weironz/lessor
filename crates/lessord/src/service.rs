@@ -27,18 +27,51 @@ fn systemd_unit(exe: &std::path::Path, args: &str) -> String {
          ExecStart={exe} {args}\n\
          Restart=on-failure\n\
          RestartSec=5\n\
-         # 注意：这里没有 User=，服务是以 root 跑的。\n\
-         # 下面这行 capability 因此并不起作用 —— 留着是为了将来真的\n\
-         # 降权时不用再想起它。要降权得先解决一件事：--config 和\n\
-         # --lease-db 指向的路径得让那个用户读写得了，而那两个路径是\n\
-         # 管理员自己给的，我们无从假设。见 ROADMAP。\n\
+         \n\
+         # 以专用用户运行。一个对外收包的服务没有理由是 root ——\n\
+         # 绑 67 端口靠下面的 capability 就够了。\n\
+         User={user}\n\
+         Group={user}\n\
          AmbientCapabilities=CAP_NET_BIND_SERVICE\n\
+         # 上面那行给的是「拿得到」，这行限的是「最多只能有这个」\n\
+         CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n\
+         NoNewPrivileges=yes\n\
+         \n\
+         # systemd 建好 {state_dir} 并归属给上面那个用户。\n\
+         # 租约库和配置文件都放这儿 —— 配置写回是「同目录建临时文件再改名」，\n\
+         # 需要的是父目录的写权限，所以它必须是一个我们自己拥有的目录。\n\
+         StateDirectory={name}\n\
+         \n\
+         # 除了状态目录，整个文件系统只读；再关掉一堆用不到的东西。\n\
+         ProtectSystem=strict\n\
+         ProtectHome=yes\n\
+         PrivateTmp=yes\n\
+         PrivateDevices=yes\n\
+         ProtectKernelTunables=yes\n\
+         ProtectKernelModules=yes\n\
+         ProtectControlGroups=yes\n\
+         RestrictRealtime=yes\n\
+         LockPersonality=yes\n\
+         SystemCallArchitectures=native\n\
+         # AF_NETLINK 是枚举网卡要用的，去掉它连自己有哪些地址都看不见\n\
+         RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX\n\
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n",
         exe = exe.display(),
+        user = SERVICE_USER,
+        name = SERVICE_USER,
+        state_dir = STATE_DIR,
     )
 }
+
+/// 服务用的专用系统用户，同时也是 `StateDirectory` 的名字。
+#[cfg(target_os = "linux")]
+const SERVICE_USER: &str = "lessord";
+
+/// `StateDirectory=lessord` 落在这里，属主是上面那个用户。
+#[cfg(target_os = "linux")]
+const STATE_DIR: &str = "/var/lib/lessord";
 
 /// 把自己注册成系统服务。`args` 是服务启动时要带的参数。
 ///
@@ -49,7 +82,10 @@ fn systemd_unit(exe: &std::path::Path, args: &str) -> String {
 /// 拆开之后每个实现只有一个出口，各平台都干净。
 pub fn install(args: &[String]) -> Result<()> {
     let exe = std::env::current_exe().context("拿不到自己的可执行文件路径")?;
-    install_on(&exe, &absolutize_paths(args).join(" "))?;
+    let args = absolutize_paths(args);
+    #[cfg(target_os = "linux")]
+    check_writable_paths(&args, STATE_DIR)?;
+    install_on(&exe, &args.join(" "))?;
     // 确认它真的活着**之后**才报成功。顺序反了的话，屏幕上会先出现
     // "已注册并启动"再跟一条报错 —— 人只会记住前一句。
     verify_running()?;
@@ -129,8 +165,84 @@ fn not_running_hint() -> &'static str {
     }
 }
 
+/// 服务要写的那几个文件。这些必须落在状态目录里 —— 见
+/// [`check_writable_paths`]。
+#[cfg(target_os = "linux")]
+const WRITABLE_FLAGS: &[&str] = &["-c", "--config", "--lease-db", "--capture"];
+
+/// 降权之后，服务要写的文件必须在它自己拥有的目录里。
+///
+/// **不是"文件可写就行"**：配置写回的做法是"在同目录建一个临时文件再改名"，
+/// 需要的是**父目录**的写权限。给 `/etc` 开写权限显然不行，所以只能要求
+/// 这些文件放进 `StateDirectory`。
+///
+/// 装之前就查，因为装完再失败的话，服务会进崩溃重启循环 ——
+/// 那种状态下的报错远不如现在这条清楚。
+#[cfg(target_os = "linux")]
+fn check_writable_paths(args: &[String], state_dir: &str) -> Result<()> {
+    let mut bad = Vec::new();
+    let mut take_next = false;
+    for a in args {
+        let value = if take_next {
+            take_next = false;
+            Some(a.as_str())
+        } else if let Some((flag, v)) = a.split_once('=')
+            && WRITABLE_FLAGS.contains(&flag)
+        {
+            Some(v)
+        } else {
+            take_next = WRITABLE_FLAGS.contains(&a.as_str());
+            None
+        };
+        if let Some(v) = value
+            && !std::path::Path::new(v).starts_with(state_dir)
+        {
+            bad.push(v.to_owned());
+        }
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "服务以 {user} 用户运行（不是 root），下面这些文件它写不了：\n  {list}\n\n\
+         把它们放到 {dir}/ 下面再注册，例如：\n  \
+         sudo mkdir -p {dir} && sudo cp <你的文件> {dir}/\n  \
+         lessord --install-service --config {dir}/lessor.json ...\n\n\
+         为什么必须是这个目录：配置写回是「同目录建临时文件再改名」，需要父目录\n\
+         的写权限；那个目录由 systemd 建好并归属给服务用户。",
+        user = SERVICE_USER,
+        dir = state_dir,
+        list = bad.join("\n  "),
+    )
+}
+
+/// 确保服务用的系统用户存在。已经有了就什么都不做。
+#[cfg(target_os = "linux")]
+fn ensure_service_user() -> Result<()> {
+    let exists = Command::new("id")
+        .args(["-u", SERVICE_USER])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    run(
+        "useradd",
+        &[
+            "--system",
+            "--no-create-home",
+            "--shell",
+            "/usr/sbin/nologin",
+            SERVICE_USER,
+        ],
+    )
+    .with_context(|| format!("建不了系统用户 {SERVICE_USER} —— 服务需要它来降权运行"))
+}
+
 #[cfg(target_os = "linux")]
 fn install_on(exe: &std::path::Path, args: &str) -> Result<()> {
+    ensure_service_user()?;
     let unit_path = std::path::Path::new("/etc/systemd/system/lessord.service");
     std::fs::write(unit_path, systemd_unit(exe, args))
         .with_context(|| format!("写不了 {} —— 注册服务需要 root", unit_path.display()))?;
@@ -384,6 +496,63 @@ Access is denied.",
         // "--config --lease-db" 这种写错的命令会被悄悄改成别的意思
         let args = vec!["--config".to_owned(), "x.json".to_owned()];
         assert_eq!(absolutize_paths(&args).len(), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn writable_paths_outside_the_state_dir_are_refused() {
+        // 降权之后服务写不了别处。装之前就拦住 —— 装完再失败的话服务会进
+        // 崩溃重启循环，那种状态下的报错远不如这条清楚。
+        let args: Vec<String> = ["--config", "/etc/lessor.json"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let err = check_writable_paths(&args, "/var/lib/lessord")
+            .expect_err("状态目录之外的可写路径必须被拒")
+            .to_string();
+        assert!(err.contains("/etc/lessor.json"), "要点名是哪个文件: {err}");
+        assert!(err.contains("/var/lib/lessord"), "要说清该放哪儿: {err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn writable_paths_inside_the_state_dir_pass() {
+        let args: Vec<String> = [
+            "--config",
+            "/var/lib/lessord/lessor.json",
+            "--lease-db=/var/lib/lessord/leases.db",
+            "--http",
+            "127.0.0.1:8080",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        assert!(check_writable_paths(&args, "/var/lib/lessord").is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unit_drops_privileges_and_keeps_only_the_one_capability() {
+        // 这条钉的是"不以 root 跑"这个承诺。少了 User= 的话，下面那行
+        // capability 就是空转的 —— 项目一直讲不需要特权，unit 里却是 root，
+        // 那是说法和事实对不上。
+        let unit = systemd_unit(
+            std::path::Path::new("/usr/local/bin/lessord"),
+            "--listen 1.2.3.4",
+        );
+        assert!(unit.contains("User=lessord"), "必须降权运行");
+        assert!(
+            unit.contains("AmbientCapabilities=CAP_NET_BIND_SERVICE"),
+            "否则绑不了 67"
+        );
+        assert!(
+            unit.contains("CapabilityBoundingSet=CAP_NET_BIND_SERVICE"),
+            "只给这一个，多的一概拿不到"
+        );
+        assert!(unit.contains("NoNewPrivileges=yes"));
+        // 枚举网卡要走 netlink，限死了连自己有哪些地址都看不见
+        assert!(unit.contains("AF_NETLINK"));
+        assert!(unit.contains("StateDirectory=lessord"));
     }
 
     #[test]

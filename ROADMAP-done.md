@@ -144,10 +144,36 @@ packets/offers/acks 与 scope_used 全部随之变化；kill -9 重启后作用�
 四条测试钉住路径展开（相对路径、`--flag=value` 形式、不接路径的参数不动、
 提示里点名相对路径这个坑）。
 
-**已知不足**：生成的 unit 里没有 `User=`，服务实际以 root 跑，那行
-`AmbientCapabilities` 是空转的 —— 和项目"不需要特权"的说法对不上。
-unit 里的注释已改为如实说明，降权作为 backlog 单列（卡在
-`--config`/`--lease-db` 路径的属主问题上）。
+**systemd 服务降权（2026-08-29 一并做掉）**：上面那条"已知不足"当场补上了 ——
+生成的 unit 原来没有 `User=`，服务以 root 跑，那行 `AmbientCapabilities`
+是空转的，和项目"不需要特权"的说法对不上。
+
+现在 unit 带 `User=lessord`（注册时按需建系统用户）、
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` 配 `CapabilityBoundingSet` 同名
+（给的是"拿得到"，限的是"最多只能有这个"）、`NoNewPrivileges=yes`，
+外加 `ProtectSystem=strict` / `ProtectHome` / `PrivateTmp` / `PrivateDevices`
+等一组沙箱。`RestrictAddressFamilies` 里必须留 `AF_NETLINK` —— 去掉它
+连本机有哪些网卡都枚举不出来。
+
+**卡点是路径属主，解法是 `StateDirectory`。** 配置写回的做法是"同目录建
+临时文件再改名"，需要的是**父目录**的写权限 —— 给 `/etc` 开写权限显然不行。
+所以 `StateDirectory=lessord` 让 systemd 建好 `/var/lib/lessord` 并归属给
+服务用户，`--config` / `--lease-db` / `--capture` 必须落在里面；不在的话
+**注册前**就拒绝并说清该怎么放（装完再失败会进崩溃重启循环，那时的报错
+远不如这条清楚）。
+
+**证据**（同一个 systemd 容器）：注册后 `ps` 显示属主是 `lessord`
+（uid 997）而非 root；`CapabilityBoundingSet=cap_net_bind_service`、
+`ProtectSystem=strict`、`NoNewPrivileges=yes` 均已生效；降权后仍绑上 67
+并真发出地址（udhcpc 拿到 172.17.0.200）；sqlite 租约库由 `lessord`
+创建写入；**配置写回实测通过** —— 通过 API 改作用域名（HTTP 204）后
+`/var/lib/lessord/lessor.json` 里出现新名字，文件属主变为 `lessord`；
+`--config /opt/work/lessor.json` 被注册前拦下且系统里不留服务；
+六步生命周期全通，且卸载**保留**状态目录（租约和配置是数据，不该跟着删）。
+
+三条测试钉住（状态目录外的可写路径被拒且点名文件、目录内放行、
+unit 必须同时有 `User=` 与那一个 capability）。这三条只在 Linux 编译，
+在容器里跑的。
 
 **未验收项**：周级长稳（soak）按定义要跑几周日历时间，留到有常驻环境时补。
 Windows 服务的成功路径仍未实测 —— 需要管理员权限，本机没有。

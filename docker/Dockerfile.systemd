@@ -17,7 +17,7 @@ FROM debian:trixie-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      systemd systemd-sysv iproute2 libcap2-bin procps ca-certificates \
+      systemd systemd-sysv iproute2 libcap2-bin procps ca-certificates curl \
  && rm -rf /var/lib/apt/lists/* \
  # 容器里这些单元没有意义，留着只会让 systemd 报一堆无关的失败，
  # 把我们要看的东西淹掉
