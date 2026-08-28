@@ -96,6 +96,29 @@ python scripts/tftpd.py ./tftproot 192.168.88.1
 
 没有访问控制，别在生产环境用。
 
+## load_test.py
+
+并发压测。N 个客户端同时握手，验证**没有一个地址被发给两台机器** ——
+这是 DHCP 服务器的头号正确性属性，也是 `LeaseStore::try_claim` 原子占位
+存在的全部理由。单元测试钉的是契约，这个脚本钉的是真并发下的结果。
+
+```bash
+LESSOR_SERVER=192.168.233.1 python scripts/load_test.py 500
+```
+
+两个设计点，都是踩过才知道的：
+
+- **收包用一个共享 socket，不是每客户端一个。** DHCP 服务器把应答发给
+  客户端端口，完全不看请求从哪个端口来 —— 每个客户端绑临时端口就一个
+  应答都收不到（同一个坑见 [dhcp-conflict-detection.md](../docs/dhcp-conflict-detection.md)）。
+- **必须重传。** 500 个 DISCOVER 同时打出去，UDP 一定丢一部分，真实客户端
+  靠 RFC 2131 的退避重传扛过去。不重传的话测出来的是"这条链路一次能塞下
+  多少包"，而不是服务端行不行 —— 实测第一版没重传时只有 253 个成功，
+  而服务端 `drops_total` 是 0、收到多少答了多少，丢的全在链路上。
+
+判断结果时**对照服务端的 `/metrics`**：`drops_total` 才是服务端主动丢的，
+客户端这边的 `no-offer` 可能只是包没到。
+
 ## 更接近真实的那一档
 
 `fake_client.py` 和 `e2e_check.py` 发的是自己拼的报文，覆盖不到真实客户端
