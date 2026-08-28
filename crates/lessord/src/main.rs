@@ -4,6 +4,7 @@
 //! 顺带开一个 HTTP 端口几乎是免费的。界面则是普通权限的纯客户端。
 
 mod api;
+mod capture;
 mod config;
 mod conflict;
 mod dhcp;
@@ -136,6 +137,28 @@ struct Cli {
     #[arg(long)]
     no_probe: bool,
 
+    /// 把收到的每个报文原样存进这个文件（JSONL，含原始字节）。
+    ///
+    /// 给真机取证用：现场跑一遍，把文件带回来用 --replay 离线复现，
+    /// 每个厂商怪癖都能钉成一条回归测试。捕获在解码之前发生 ——
+    /// 解不出来的包恰恰最值钱。不需要抓包驱动，也不需要特权。
+    #[arg(long, value_name = "路径")]
+    capture: Option<PathBuf>,
+
+    /// 只看不答：收包、记录、在界面上显示"本来会怎么答"，但一个字节都不发。
+    ///
+    /// 挂在**已经有 DHCP 的生产网段**上取证时必须开 —— 否则就是两个
+    /// DHCP 抢答，机器可能装到一半失联。远程给真机 BMC 取怪癖走这条。
+    #[arg(long)]
+    observe: bool,
+
+    /// 重放一个 --capture 出来的文件，逐条打印决策层的结论后退出。
+    ///
+    /// 走的是真正的 handle()，不是另写一套模拟。作用域取自 --config
+    /// 或下面那些快捷参数。
+    #[arg(long, value_name = "路径")]
+    replay: Option<PathBuf>,
+
     /// 闲置这么多秒后自行退出。给现场临时使用：装完机走人，
     /// 不用记得回来关掉它。常驻部署不要开 —— 没人要地址不代表服务该消失。
     ///
@@ -162,6 +185,8 @@ struct Started {
     config_path: Option<PathBuf>,
     no_probe: bool,
     idle_exit: Option<u64>,
+    capture: Option<PathBuf>,
+    observe: bool,
 }
 
 impl Cli {
@@ -179,7 +204,7 @@ impl Cli {
                     (Some(ip), _) => Some(ip),
                     (None, true) => None,
                     (None, false) => bail!(
-                        "没给 --config 时必须给 --listen（本机在该网段上的地址），\n                         或者用 --serve-empty 先起服务再在界面上选网卡"
+                        "没给 --config 时必须给 --listen（本机在该网段上的地址）；或者用 --serve-empty 先起服务，再在界面上选网卡"
                     ),
                 };
                 // --serve-empty 时允许没有地址池：先把服务和监听器起起来，
@@ -188,7 +213,7 @@ impl Cli {
                     (Some(p), _) => Some(config::parse_range(p)?),
                     (None, true) => None,
                     (None, false) => bail!(
-                        "没给 --config 时必须给 --pool（形如 192.168.88.10-192.168.88.20），\n                         或者用 --serve-empty 先起服务再在界面上建作用域"
+                        "没给 --config 时必须给 --pool（形如 192.168.88.10-192.168.88.20）；或者用 --serve-empty 先起服务，再在界面上建作用域"
                     ),
                 };
                 let reservations = self
@@ -234,8 +259,44 @@ impl Cli {
             config_path: self.config.clone(),
             no_probe: self.no_probe,
             idle_exit: self.idle_exit,
+            capture: self.capture.clone(),
+            observe: self.observe,
         })
     }
+}
+
+/// 重放一个捕获文件，把结论打出来。
+///
+/// 无法解码的放在最后单独列 —— 那些才是要动手的地方，混在一长串
+/// "正常"里会被划过去。
+fn run_replay(path: &std::path::Path, scopes: Vec<lessor_core::Scope>) -> Result<()> {
+    let results = capture::replay(path, scopes)?;
+    if results.is_empty() {
+        println!("{} 里没有记录。", path.display());
+        return Ok(());
+    }
+
+    let mut odd = Vec::new();
+    println!("共 {} 条：\n", results.len());
+    for (line, verdict) in &results {
+        match verdict {
+            capture::Verdict::Decided(s) => println!("  #{line:<4} {s}"),
+            capture::Verdict::Undecodable(s) => {
+                println!("  #{line:<4} !! 无法解码");
+                odd.push((line, s));
+            }
+        }
+    }
+
+    if odd.is_empty() {
+        println!("\n全部能解码。");
+        return Ok(());
+    }
+    println!("\n{} 条无法解码 —— 这些是要看的：\n", odd.len());
+    for (line, s) in odd {
+        println!("  #{line}: {s}\n");
+    }
+    Ok(())
 }
 
 /// 用系统默认程序打开一个 URL。
@@ -287,6 +348,12 @@ async fn main() -> Result<()> {
         return service::install(&args);
     }
 
+    // 重放同样是一次性动作：读文件、打结论、退出，不碰网络
+    if let Some(path) = cli.replay.clone() {
+        let scopes = cli.into_config()?.cfg.scopes;
+        return run_replay(&path, scopes);
+    }
+
     let Started {
         cfg,
         ports,
@@ -298,6 +365,8 @@ async fn main() -> Result<()> {
         config_path,
         no_probe,
         idle_exit,
+        capture: capture_path,
+        observe,
     } = cli.into_config()?;
 
     // 非 Linux 上没有把 socket 钉在网卡上的办法，多监听器时无法判断
@@ -332,6 +401,19 @@ async fn main() -> Result<()> {
         .with_token(token)
         .with_listener_spawner(new_listener_tx)
         .with_config_path(config_path);
+
+    let capture = match &capture_path {
+        Some(p) => {
+            let c = capture::Capture::open(p)?;
+            info!(file = %p.display(), "报文捕获已开启 —— 收到的每个包都会原样存下来");
+            Some(c)
+        }
+        None => None,
+    };
+    state = state.with_capture(capture).with_observe(observe);
+    if observe {
+        warn!("只看不答模式：会收包、会记录、界面上能看到本来会怎么答，但不会往网络上发任何东西");
+    }
 
     if let Some(path) = &lease_db {
         let store = sqlite::SqliteStore::open(path)

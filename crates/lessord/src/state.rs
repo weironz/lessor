@@ -290,6 +290,10 @@ pub struct AppState {
     /// 已知被静态占用的地址。后台探测填充，分配路径只读 ——
     /// 查缓存是纳秒级的，不会拖慢握手。
     pub occupied: crate::conflict::Occupied,
+    /// 开了 --capture 时，收到的每个包都原样存一份。给真机 BMC 取证用。
+    capture: Option<Arc<crate::capture::Capture>>,
+    /// 只看不答。挂在生产网段上取证时必须开 —— 那儿已经有别人在发地址了。
+    observe: bool,
 }
 
 /// 作用域可改的部分。`None` 表示不动这一项。
@@ -346,6 +350,30 @@ impl AppState {
         self.token.is_some()
     }
 
+    /// 只看不答。
+    #[must_use]
+    pub fn with_observe(mut self, observe: bool) -> Self {
+        self.observe = observe;
+        self
+    }
+
+    /// 是不是只看不答。
+    pub fn observing(&self) -> bool {
+        self.observe
+    }
+
+    /// 开启报文捕获。
+    #[must_use]
+    pub fn with_capture(mut self, cap: Option<crate::capture::Capture>) -> Self {
+        self.capture = cap.map(Arc::new);
+        self
+    }
+
+    /// 正在捕获的话给出句柄。
+    pub fn capture(&self) -> Option<&crate::capture::Capture> {
+        self.capture.as_deref()
+    }
+
     /// 换用 sqlite 存储。常驻形态走这条 —— 重启不丢租约。
     #[must_use]
     pub fn with_store(self, store: Store) -> Self {
@@ -376,6 +404,8 @@ impl AppState {
             config_path: None,
             counters: Arc::new(Counters::default()),
             occupied,
+            capture: None,
+            observe: false,
         }
     }
 

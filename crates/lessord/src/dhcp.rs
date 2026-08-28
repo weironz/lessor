@@ -257,10 +257,22 @@ pub async fn serve(state: AppState, listener: Listener, ports: Ports) -> Result<
             }
         };
 
+        // 捕获在解码之前。解不出来的包恰恰最值钱 —— 真机 BMC 的怪癖
+        // 就藏在那里，而它们连结构都没有，等解码完再抓就永远抓不到。
+        if let Some(cap) = state.capture() {
+            cap.record(
+                crate::state::now(),
+                from,
+                &listener.server_ip.to_string(),
+                &buf[..n],
+            );
+        }
+
         let req = match Message::decode(&mut Decoder::new(&buf[..n])) {
             Ok(m) => m,
             Err(e) => {
-                debug!(%from, error = %e, "丢弃无法解析的报文");
+                // 收到认不出来的报文是值得知道的事，不该只在 debug 里
+                warn!(%from, error = %e, wire = %hex(&buf[..n]), "丢弃无法解析的报文");
                 continue;
             }
         };
@@ -275,8 +287,10 @@ pub async fn serve(state: AppState, listener: Listener, ports: Ports) -> Result<
         }
 
         // 客户端不认应答时，光看"已应答"那一行没用 —— 得逐字段对。
+        // 原始字节和解码后的结构都要：解码后的是"我们理解成了什么"，
+        // 原始字节才是"线上到底是什么"，两者对不上正是怪癖所在。
         // 放在 trace 级：RUST_LOG=lessord::dhcp=trace 打开。
-        trace!(?req, "收到（解码后）");
+        trace!(?req, wire = %hex(&buf[..n]), "收到（解码后 + 原始字节）");
 
         let outcome = state.handle_packet(&req, listener.server_ip).await;
 
@@ -305,6 +319,21 @@ pub async fn serve(state: AppState, listener: Listener, ports: Ports) -> Result<
         let Outcome::Reply(reply) = outcome else {
             continue;
         };
+
+        // 只看不答。挂在生产网段上取证时唯一安全的姿势 —— 那儿已经有别人
+        // 在发地址了，我们再答一句就是两个 DHCP 抢答，机器可能装到一半失联。
+        //
+        // 决策层照跑不误：日志和界面上能看到"我们本来会怎么答"，
+        // 那正是要验的东西。只是不往线上发。
+        if state.observing() {
+            debug!(
+                client = %crate::state::client_label(&req),
+                would_reply = %crate::state::reply_label(&reply.msg),
+                ip = %reply.msg.yiaddr(),
+                "只看不答，本来会这样应答"
+            );
+            continue;
+        }
 
         let mut out = Vec::with_capacity(BUF);
         if let Err(e) = reply.msg.encode(&mut Encoder::new(&mut out)) {
