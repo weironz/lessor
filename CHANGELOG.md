@@ -8,7 +8,20 @@
 
 ## [Unreleased]
 
-进行中的工作见 [ROADMAP.md](ROADMAP.md)（队首：M4 运行时配置与认证）。
+### Added
+
+- 界面上新建作用域（`POST /api/scopes`），建完自动在对应网卡起监听器 ——
+  不必带 `--listen/--pool` 启动，服务先跑起来、配置在应用里做
+- `--serve-empty`：不带作用域启动（零作用域时不应答任何 DHCP 请求）
+- 写操作守卫：`Host` 必须是 IP 字面量（防 DNS rebinding）；
+  配了 `--token`（或 `LESSOR_TOKEN`）时写操作需带 `Authorization: Bearer`
+
+### Changed
+
+- **桌面端双击直接进界面** —— 不再先显示"连不上 lessord"的表单页。
+  没有作用域时由界面自己用"开始发地址"的空状态卡片处理
+
+进行中的工作见 [ROADMAP.md](ROADMAP.md)。
 
 ## [0.0.2] - 2026-08-28
 
