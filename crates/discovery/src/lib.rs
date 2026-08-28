@@ -215,6 +215,91 @@ pub async fn scan(opts: Options) -> Vec<Device> {
     out
 }
 
+// ---------- 给冲突探测用的原语 ----------
+
+/// 探一批地址，返回其中已经有人应答的（以及是谁）。
+///
+/// 复用"发 UDP 逼系统做 ARP、再读邻居表"这套 —— 不需要 raw socket，
+/// 三个平台通用，也不需要任何特权。
+///
+/// 探不到不等于地址空闲：设备可能关着机、或防火墙不理 ARP 之外的包。
+/// 所以调用方应当把结果当作"已知被占"的白名单，而不是"未列出即空闲"
+/// 的证明。
+pub async fn probe_occupied(
+    targets: &[Ipv4Addr],
+    bind: Ipv4Addr,
+) -> Vec<(Ipv4Addr, Option<MacAddr>)> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let _ = provoke(targets, bind).await;
+    // 给系统一点时间完成 ARP 交互并写进邻居表
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let table = neighbor::neighbors();
+    targets
+        .iter()
+        .filter_map(|ip| {
+            table
+                .iter()
+                .find(|n| n.ip == *ip)
+                .map(|n| (*ip, Some(n.mac)))
+        })
+        .collect()
+}
+
+/// 拼一个最小的 DHCPDISCOVER，用来探同网段还有没有别的 DHCP 服务器。
+///
+/// 只带 option 53，不带 option 55 —— 我们不关心对方会给什么参数，
+/// 只关心它会不会应答。
+pub fn dhcp_discover(xid: u32, mac: [u8; 6]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(300);
+    p.push(1); // op: BOOTREQUEST
+    p.push(1); // htype: 以太网
+    p.push(6); // hlen
+    p.push(0); // hops
+    p.extend_from_slice(&xid.to_be_bytes());
+    p.extend_from_slice(&0u16.to_be_bytes()); // secs
+    p.extend_from_slice(&0x8000u16.to_be_bytes()); // flags: 要求广播应答
+    p.extend_from_slice(&[0; 16]); // ciaddr/yiaddr/siaddr/giaddr
+    p.extend_from_slice(&mac);
+    p.extend_from_slice(&[0; 10]); // chaddr 补齐 16 字节
+    p.extend_from_slice(&[0; 192]); // sname + file
+    p.extend_from_slice(&[0x63, 0x82, 0x53, 0x63]); // magic cookie
+    p.extend_from_slice(&[53, 1, 1]); // option 53 = DISCOVER
+    p.push(0xff);
+    p
+}
+
+/// 这个包是不是对我们那次探测的应答（OFFER 或 ACK，且 xid 对得上）。
+pub fn is_dhcp_reply_to(buf: &[u8], xid: u32) -> bool {
+    // 头部 240 字节 + 至少一个选项
+    if buf.len() < 241 || buf[0] != 2 {
+        return false;
+    }
+    if u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) != xid {
+        return false;
+    }
+    if buf[236..240] != [0x63, 0x82, 0x53, 0x63] {
+        return false;
+    }
+    // 找 option 53，看是不是 OFFER(2) / ACK(5)
+    let mut i = 240;
+    while i < buf.len() && buf[i] != 0xff {
+        if buf[i] == 0 {
+            i += 1;
+            continue;
+        }
+        let Some(&len) = buf.get(i + 1) else { break };
+        let len = len as usize;
+        if buf[i] == 53 {
+            return matches!(buf.get(i + 2), Some(2 | 5));
+        }
+        i += 2 + len;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

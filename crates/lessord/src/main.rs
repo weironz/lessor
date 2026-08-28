@@ -5,6 +5,7 @@
 
 mod api;
 mod config;
+mod conflict;
 mod dhcp;
 mod service;
 mod sqlite;
@@ -127,6 +128,13 @@ struct Cli {
     #[arg(long)]
     uninstall_service: bool,
 
+    /// 关掉 OFFER 前的地址冲突探测。
+    ///
+    /// 探测本身不需要特权也不在握手路径上，正常不该关；留这个开关是给
+    /// 那些禁止主动探测的网络（有些安全策略会把 ARP 扫描当告警）。
+    #[arg(long)]
+    no_probe: bool,
+
     /// 管理接口的访问令牌。给了就强制校验（写操作必须带），
     /// 不给则只有本机能用（默认只听 127.0.0.1）。
     #[arg(long, value_name = "TOKEN", env = "LESSOR_TOKEN")]
@@ -143,6 +151,7 @@ struct Started {
     open: bool,
     lease_db: Option<PathBuf>,
     config_path: Option<PathBuf>,
+    no_probe: bool,
 }
 
 impl Cli {
@@ -160,7 +169,7 @@ impl Cli {
                     (Some(ip), _) => Some(ip),
                     (None, true) => None,
                     (None, false) => bail!(
-                        "没给 --config 时必须给 --listen（本机在该网段上的地址），                         或者用 --serve-empty 先起服务再在界面上选网卡"
+                        "没给 --config 时必须给 --listen（本机在该网段上的地址），\n                         或者用 --serve-empty 先起服务再在界面上选网卡"
                     ),
                 };
                 // --serve-empty 时允许没有地址池：先把服务和监听器起起来，
@@ -169,7 +178,7 @@ impl Cli {
                     (Some(p), _) => Some(config::parse_range(p)?),
                     (None, true) => None,
                     (None, false) => bail!(
-                        "没给 --config 时必须给 --pool（形如 192.168.88.10-192.168.88.20），                         或者用 --serve-empty 先起服务再在界面上建作用域"
+                        "没给 --config 时必须给 --pool（形如 192.168.88.10-192.168.88.20），\n                         或者用 --serve-empty 先起服务再在界面上建作用域"
                     ),
                 };
                 let reservations = self
@@ -213,6 +222,7 @@ impl Cli {
             open: self.open,
             lease_db: self.lease_db.clone(),
             config_path: self.config.clone(),
+            no_probe: self.no_probe,
         })
     }
 }
@@ -275,6 +285,7 @@ async fn main() -> Result<()> {
         open,
         lease_db,
         config_path,
+        no_probe,
     } = cli.into_config()?;
 
     // 非 Linux 上没有把 socket 钉在网卡上的办法，多监听器时无法判断
@@ -329,6 +340,9 @@ async fn main() -> Result<()> {
             });
         };
 
+    // 后面探测同段其他 DHCP 要用，先留一份地址
+    let listen_addrs: Vec<std::net::Ipv4Addr> = cfg.listeners.iter().map(|l| l.server_ip).collect();
+
     for listener in cfg.listeners {
         spawn_listener(&mut tasks, state.clone(), listener);
     }
@@ -353,6 +367,36 @@ async fn main() -> Result<()> {
     {
         let st = state.clone();
         tasks.spawn(async move { dhcp::reaper(st, reap_secs).await });
+    }
+
+    if !no_probe {
+        // 后台持续探测地址占用。结果进缓存，分配路径只查缓存，
+        // 所以不会拖慢握手。
+        let st = state.clone();
+        let occ = state.occupied.clone();
+        tasks.spawn(async move {
+            conflict::sweeper(st, occ, std::time::Duration::from_secs(60)).await;
+        });
+
+        // 启动时探一次同网段有没有别的 DHCP 服务器。
+        // 这是安全红线：把 DHCP 插进已有 DHCP 的网段会让机器装到一半失联。
+        for bind in listen_addrs {
+            tokio::spawn(async move {
+                match conflict::detect_foreign_servers(bind, std::time::Duration::from_secs(3))
+                    .await
+                {
+                    Ok(found) if !found.is_empty() => warn!(
+                        servers = ?found,
+                        "本网段已有其他 DHCP 服务器。两边同时发地址会互相干扰 —— \
+                         确认这是你要的，否则请停掉其中一边"
+                    ),
+                    Ok(_) => info!(iface = %bind, "本网段未发现其他 DHCP 服务器"),
+                    // 查不成必须说出来。这是条安全检查，闷掉之后人会以为
+                    // "没告警就是没冲突" —— 假的全清信号比不查更糟
+                    Err(e) => warn!(iface = %bind, error = %e, "同网段 DHCP 检查没能进行"),
+                }
+            });
+        }
     }
 
     {

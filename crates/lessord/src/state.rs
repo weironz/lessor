@@ -119,6 +119,55 @@ pub enum Store {
     Sqlite(crate::sqlite::SqliteStore),
 }
 
+/// 存储 + 冲突探测结果。
+///
+/// `LeaseStore` 的 `is_occupied_elsewhere` 需要探测数据，但探测不属于
+/// 存储的职责 —— 用这层包装把两者拼起来，core 因此不必知道 discovery
+/// 的存在。
+pub struct StoreWithProbe {
+    pub store: Store,
+    pub occupied: crate::conflict::Occupied,
+}
+
+impl LeaseStore for StoreWithProbe {
+    fn get_by_ip(&self, scope: ScopeId, ip: Ipv4Addr) -> Option<Lease> {
+        self.store.get_by_ip(scope, ip)
+    }
+    fn get_by_client(&self, scope: ScopeId, client: &lessor_core::ClientId) -> Option<Lease> {
+        self.store.get_by_client(scope, client)
+    }
+    fn insert(&mut self, lease: Lease) {
+        self.store.insert(lease);
+    }
+    fn try_claim(&mut self, lease: Lease, now: UnixTime) -> bool {
+        self.store.try_claim(lease, now)
+    }
+    fn remove(&mut self, scope: ScopeId, ip: Ipv4Addr) -> Option<Lease> {
+        self.store.remove(scope, ip)
+    }
+    fn all(&self) -> Vec<Lease> {
+        self.store.all()
+    }
+    fn reap(&mut self, now: UnixTime) -> usize {
+        self.store.reap(now)
+    }
+    fn clear_scope(&mut self, scope: ScopeId) -> usize {
+        self.store.clear_scope(scope)
+    }
+    fn usable_by(
+        &self,
+        scope: ScopeId,
+        ip: Ipv4Addr,
+        client: &lessor_core::ClientId,
+        now: UnixTime,
+    ) -> bool {
+        self.store.usable_by(scope, ip, client, now)
+    }
+    fn is_occupied_elsewhere(&self, ip: Ipv4Addr) -> bool {
+        self.occupied.is_taken(ip)
+    }
+}
+
 impl LeaseStore for Store {
     fn get_by_ip(&self, scope: ScopeId, ip: Ipv4Addr) -> Option<Lease> {
         match self {
@@ -194,7 +243,7 @@ impl Store {
 struct Inner {
     server: ServerConfig,
     listeners: Vec<Listener>,
-    store: Store,
+    store: StoreWithProbe,
 }
 
 /// 运行计数。常驻部署要能回答"它到底在干活吗" ——
@@ -232,6 +281,9 @@ pub struct AppState {
     /// 常驻服务重启后配置还在，否则界面改的东西活不过一次重启。
     config_path: Option<Arc<std::path::Path>>,
     pub counters: Arc<Counters>,
+    /// 已知被静态占用的地址。后台探测填充，分配路径只读 ——
+    /// 查缓存是纳秒级的，不会拖慢握手。
+    pub occupied: crate::conflict::Occupied,
 }
 
 /// 作用域可改的部分。`None` 表示不动这一项。
@@ -293,7 +345,7 @@ impl AppState {
     pub fn with_store(self, store: Store) -> Self {
         // 构造期独占，不会有别的持有者
         if let Ok(mut g) = self.inner.try_write() {
-            g.store = store;
+            g.store.store = store;
         }
         self
     }
@@ -301,11 +353,15 @@ impl AppState {
     pub fn new(cfg: Config) -> Self {
         // 容量给足，慢速的 WebSocket 客户端掉几条事件也不该拖住 DHCP 主循环
         let (events, _) = broadcast::channel(512);
+        let occupied = crate::conflict::Occupied::default();
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 server: ServerConfig::new(cfg.scopes),
                 listeners: cfg.listeners,
-                store: Store::Memory(MemoryStore::new()),
+                store: StoreWithProbe {
+                    store: Store::Memory(MemoryStore::new()),
+                    occupied: occupied.clone(),
+                },
             })),
             events,
             started_at: now(),
@@ -313,6 +369,7 @@ impl AppState {
             new_listener: None,
             config_path: None,
             counters: Arc::new(Counters::default()),
+            occupied,
         }
     }
 
@@ -426,7 +483,19 @@ impl AppState {
                 result: "DROP",
                 scope_id: None,
                 ip: None,
-                detail: Some(drop_reason_text(*r).to_owned()),
+                // 池满时多半是因为一批地址被静态占用挡住了 —— 把占用者
+                // 说出来，否则界面上只有"地址池已耗尽"，没法排查
+                detail: Some(match r {
+                    DropReason::PoolExhausted => {
+                        let blocked = self.occupied.blocked_summary();
+                        if blocked.is_empty() {
+                            drop_reason_text(*r).to_owned()
+                        } else {
+                            format!("{}（{blocked}）", drop_reason_text(*r))
+                        }
+                    }
+                    _ => drop_reason_text(*r).to_owned(),
+                }),
             },
         };
 
@@ -456,7 +525,7 @@ impl AppState {
                 subnet: s.subnet,
                 prefix: s.prefix,
                 capacity: s.capacity(),
-                used: g.store.used_in(s.id, t),
+                used: g.store.store.used_in(s.id, t),
                 reservations: s.reservations.len(),
                 server_ip: g
                     .listeners
@@ -532,6 +601,23 @@ impl AppState {
             );
         }
         out
+    }
+
+    /// 作用域与监听器的快照 —— 后台探测要用。
+    pub async fn scopes_and_listeners(&self) -> (Vec<lessor_core::Scope>, Vec<Listener>) {
+        let g = self.inner.read().await;
+        (g.server.scopes.clone(), g.listeners.clone())
+    }
+
+    /// 某个作用域里已经发出去的地址。探测只扫还没分出去的。
+    pub async fn leased_ips(&self, scope: ScopeId) -> std::collections::HashSet<Ipv4Addr> {
+        let g = self.inner.read().await;
+        g.store
+            .all()
+            .into_iter()
+            .filter(|l| l.scope_id == scope)
+            .map(|l| l.ip)
+            .collect()
     }
 
     pub async fn listeners(&self) -> Vec<Listener> {

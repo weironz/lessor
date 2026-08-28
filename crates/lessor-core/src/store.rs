@@ -52,6 +52,15 @@ pub trait LeaseStore {
     /// 清掉已过期且不再需要保留的记录，返回清理条数。
     fn reap(&mut self, now: UnixTime) -> usize;
 
+    /// 这个地址在网络上是否已被别人静态占用（而不是被我们发出去的）。
+    ///
+    /// 默认 `false`：不做探测的部署行为不变。上层接了冲突探测之后重写它，
+    /// 分配就会自动绕开那些地址 —— 把地址发给一台已经用着它的机器，
+    /// 结果是两台机器地址冲突，比池子少几个地址糟得多。
+    fn is_occupied_elsewhere(&self, _ip: Ipv4Addr) -> bool {
+        false
+    }
+
     /// 删掉某个作用域的全部租约，返回条数。
     ///
     /// 删作用域时必须一并清掉 —— 留着会让"已用"统计和界面出现
@@ -246,6 +255,7 @@ where
     if let Some(want) = requested
         && scope.is_poolable(want)
         && !scope.is_reserved_for_other(want, client)
+        && !store.is_occupied_elsewhere(want)
         && store.try_claim(make_lease(want), now)
     {
         return Some(Allocation {
@@ -258,7 +268,7 @@ where
     // 而 try_claim 要可变借 store，两者不能同时活着。
     let candidates: Vec<Ipv4Addr> = scope
         .poolable_addrs()
-        .filter(|ip| !scope.is_reserved_for_other(*ip, client))
+        .filter(|ip| !scope.is_reserved_for_other(*ip, client) && !store.is_occupied_elsewhere(*ip))
         .collect();
     for ip in candidates {
         if store.try_claim(make_lease(ip), now) {
