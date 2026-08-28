@@ -38,96 +38,105 @@ fn systemd_unit(exe: &std::path::Path, args: &str) -> String {
 }
 
 /// 把自己注册成系统服务。`args` 是服务启动时要带的参数。
+///
+/// 各平台的实现拆成独立函数，而不是在一个函数体里堆 `#[cfg]` 块。
+/// 后者看着更紧凑，但每个块都得靠 `return` 收尾，于是**在只剩一个块的
+/// 平台上，那个 `return` 就成了多余的**，clippy 会报 needless_return ——
+/// 而在写代码的那台机器上永远看不到，因为那个分支被 cfg 掉了。
+/// 拆开之后每个实现只有一个出口，各平台都干净。
 pub fn install(args: &[String]) -> Result<()> {
     let exe = std::env::current_exe().context("拿不到自己的可执行文件路径")?;
-    let joined = args.join(" ");
+    install_on(&exe, &args.join(" "))
+}
 
-    #[cfg(target_os = "linux")]
-    {
-        let unit_path = std::path::Path::new("/etc/systemd/system/lessord.service");
-        std::fs::write(unit_path, systemd_unit(&exe, &joined))
-            .with_context(|| format!("写不了 {} —— 注册服务需要 root", unit_path.display()))?;
-        run("systemctl", &["daemon-reload"])?;
-        run("systemctl", &["enable", "lessord"])?;
-        run("systemctl", &["start", "lessord"])?;
-        println!("已注册为 systemd 服务并启动。");
-        println!("  状态：systemctl status lessord");
-        println!("  日志：journalctl -u lessord -f");
-        println!("  卸载：lessord --uninstall-service");
-        return Ok(());
-    }
+#[cfg(target_os = "linux")]
+fn install_on(exe: &std::path::Path, args: &str) -> Result<()> {
+    let unit_path = std::path::Path::new("/etc/systemd/system/lessord.service");
+    std::fs::write(unit_path, systemd_unit(exe, args))
+        .with_context(|| format!("写不了 {} —— 注册服务需要 root", unit_path.display()))?;
+    run("systemctl", &["daemon-reload"])?;
+    run("systemctl", &["enable", "lessord"])?;
+    run("systemctl", &["start", "lessord"])?;
+    println!("已注册为 systemd 服务并启动。");
+    println!("  状态：systemctl status lessord");
+    println!("  日志：journalctl -u lessord -f");
+    println!("  卸载：lessord --uninstall-service");
+    Ok(())
+}
 
-    #[cfg(windows)]
-    {
-        // sc.exe 的 binPath= 后面必须有空格，且整条命令行要作为一个参数传。
-        // 可执行文件路径可能含空格，所以内层再加一层引号。
-        let bin = format!("\"{}\" {}", exe.display(), joined);
-        run(
-            "sc.exe",
-            &[
-                "create",
-                "lessord",
-                "binPath=",
-                &bin,
-                "start=",
-                "auto",
-                "DisplayName=",
-                "lessor DHCP 服务",
-            ],
-        )?;
-        // 崩溃后自动重启：5 秒、10 秒、之后每 30 秒
-        let _ = run(
-            "sc.exe",
-            &[
-                "failure",
-                "lessord",
-                "reset=",
-                "86400",
-                "actions=",
-                "restart/5000/restart/10000/restart/30000",
-            ],
-        );
-        run("sc.exe", &["start", "lessord"])?;
-        println!("已注册为 Windows 服务并启动。");
-        println!("  状态：sc query lessord");
-        println!("  卸载：lessord --uninstall-service");
-        Ok(())
-    }
+#[cfg(windows)]
+fn install_on(exe: &std::path::Path, args: &str) -> Result<()> {
+    // sc.exe 的 binPath= 后面必须有空格，且整条命令行要作为一个参数传。
+    // 可执行文件路径可能含空格，所以内层再加一层引号。
+    let bin = format!("\"{}\" {args}", exe.display());
+    run(
+        "sc.exe",
+        &[
+            "create",
+            "lessord",
+            "binPath=",
+            &bin,
+            "start=",
+            "auto",
+            "DisplayName=",
+            "lessor DHCP 服务",
+        ],
+    )?;
+    // 崩溃后自动重启：5 秒、10 秒、之后每 30 秒
+    let _ = run(
+        "sc.exe",
+        &[
+            "failure",
+            "lessord",
+            "reset=",
+            "86400",
+            "actions=",
+            "restart/5000/restart/10000/restart/30000",
+        ],
+    );
+    run("sc.exe", &["start", "lessord"])?;
+    println!("已注册为 Windows 服务并启动。");
+    println!("  状态：sc query lessord");
+    println!("  卸载：lessord --uninstall-service");
+    Ok(())
+}
 
-    #[cfg(not(any(target_os = "linux", windows)))]
-    {
-        let _ = (exe, joined);
-        bail!("当前平台还不支持注册系统服务，请手工用进程管理器托管");
-    }
+#[cfg(not(any(target_os = "linux", windows)))]
+fn install_on(_exe: &std::path::Path, _args: &str) -> Result<()> {
+    bail!("当前平台还不支持注册系统服务，请手工用进程管理器托管")
 }
 
 /// 注销系统服务。
 pub fn uninstall() -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        // 停和 disable 失败不致命 —— 服务可能本来就没在跑
-        let _ = run("systemctl", &["stop", "lessord"]);
-        let _ = run("systemctl", &["disable", "lessord"]);
-        let unit_path = std::path::Path::new("/etc/systemd/system/lessord.service");
-        if unit_path.exists() {
-            std::fs::remove_file(unit_path)
-                .with_context(|| format!("删不掉 {}", unit_path.display()))?;
-        }
-        let _ = run("systemctl", &["daemon-reload"]);
-        println!("已注销 systemd 服务。");
-        return Ok(());
-    }
+    uninstall_on()
+}
 
-    #[cfg(windows)]
-    {
-        let _ = run("sc.exe", &["stop", "lessord"]);
-        run("sc.exe", &["delete", "lessord"])?;
-        println!("已注销 Windows 服务。");
-        Ok(())
+#[cfg(target_os = "linux")]
+fn uninstall_on() -> Result<()> {
+    // 停和 disable 失败不致命 —— 服务可能本来就没在跑
+    let _ = run("systemctl", &["stop", "lessord"]);
+    let _ = run("systemctl", &["disable", "lessord"]);
+    let unit_path = std::path::Path::new("/etc/systemd/system/lessord.service");
+    if unit_path.exists() {
+        std::fs::remove_file(unit_path)
+            .with_context(|| format!("删不掉 {}", unit_path.display()))?;
     }
+    let _ = run("systemctl", &["daemon-reload"]);
+    println!("已注销 systemd 服务。");
+    Ok(())
+}
 
-    #[cfg(not(any(target_os = "linux", windows)))]
-    bail!("当前平台没有可注销的服务");
+#[cfg(windows)]
+fn uninstall_on() -> Result<()> {
+    let _ = run("sc.exe", &["stop", "lessord"]);
+    run("sc.exe", &["delete", "lessord"])?;
+    println!("已注销 Windows 服务。");
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn uninstall_on() -> Result<()> {
+    bail!("当前平台没有可注销的服务")
 }
 
 /// 从命令输出里认出"权限不足"。

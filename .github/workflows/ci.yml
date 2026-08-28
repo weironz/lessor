@@ -13,8 +13,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # 两个平台都跑。收发那层有相当一部分代码在 #[cfg(windows)] /
+  # #[cfg(target_os = "linux")] 里，只跑一个平台等于另一半永远没被
+  # CI 看过 —— 实际发生过：一处 needless_return 只在 Linux 上成立，
+  # 在 Windows 开发机上编译不到，红了两次才被发现。
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
