@@ -26,6 +26,9 @@ export const getInterfaces = () => json('/api/interfaces')
 export const revokeLease = (scopeId, ip) =>
   json(`/api/leases/${scopeId}/${ip}`, { method: 'DELETE' })
 
+export const createScope = (body) =>
+  json('/api/scopes', { method: 'POST', body: JSON.stringify(body) })
+
 export const discover = (addr, prefix, sweep = true) =>
   json('/api/discover', {
     method: 'POST',

@@ -5,6 +5,7 @@
   import Leases from './lib/Leases.svelte'
   import Events from './lib/Events.svelte'
   import Discover from './lib/Discover.svelte'
+  import NewScope from './lib/NewScope.svelte'
 
   let tab = $state('scopes')
   let status = $state('connecting')
@@ -39,7 +40,11 @@
         if (ev.kind === 'packet') {
           // 只留最近 300 条，界面不该无限增长
           packets = [ev, ...packets].slice(0, 300)
-        } else if (ev.kind === 'leasesChanged' || ev.kind === 'reaped') {
+        } else if (
+          ev.kind === 'leasesChanged' ||
+          ev.kind === 'reaped' ||
+          ev.kind === 'scopesChanged'
+        ) {
           refresh()
         }
       },
@@ -49,6 +54,10 @@
       stop()
     }
   })
+
+  // 服务起来了但一个作用域都没有 —— 这不是错误状态，是"还没开工"。
+  // 此时整个界面就是一张开工表单，不摆一堆空标签页。
+  const needsSetup = $derived(state !== null && state.scopes.length === 0)
 
   const statusLabel = $derived(
     { online: '已连接', offline: '连接中断', connecting: '连接中' }[status] ?? status,
@@ -73,6 +82,9 @@
   <p class="err">接口出错：{error}</p>
 {/if}
 
+{#if needsSetup}
+  <NewScope oncreated={refresh} />
+{:else}
 <nav>
   {#each TABS as t (t.id)}
     <button class:active={tab === t.id} onclick={() => (tab = t.id)}>
@@ -95,6 +107,7 @@
     <Discover />
   {/if}
 </main>
+{/if}
 
 <style>
   header {

@@ -3,15 +3,12 @@
   "productName": "lessor",
   "version": "0.0.2",
   "identifier": "io.lessor.desktop",
-  "build": {
-    "frontendDist": "fallback"
-  },
+  "build": {},
   "app": {
     "windows": [],
     "security": {
       "csp": null
-    },
-    "withGlobalTauri": true
+    }
   },
   "bundle": {
     "active": true,

@@ -31,7 +31,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/leases/{scope_id}/{ip}", delete(revoke_lease))
         .route("/api/interfaces", get(get_interfaces))
         .route("/api/discover", post(post_discover))
+        .route("/api/scopes", post(post_scope))
         .route("/api/events", get(events))
+        // 写操作的守卫。放在路由之后、fallback 之前 ——
+        // 前端资源和只读接口不受影响。
+        .layer(axum::middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
         // 前端资源打包在二进制里，任何未匹配的路径都交给它 ——
         // 这样单页应用的前端路由才不会 404
@@ -40,6 +44,138 @@ pub fn router(state: AppState) -> Router {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+// ---------- 写操作守卫 ----------
+
+/// 拦住两类风险，只作用于写操作（GET 不受影响）：
+///
+/// 1. **DNS rebinding**：浏览器可以被诱导把某个恶意域名解析到 127.0.0.1，
+///    然后用页面脚本打本机的管理接口。校验 Host 头只允许 IP 字面量形式，
+///    域名一律拒绝 —— 我们从不需要通过域名访问自己。
+/// 2. **越权**：配了 `--token` 时写操作必须带 `Authorization: Bearer <token>`。
+///
+/// 只读接口不设防是有意的：默认只监听 127.0.0.1，读到的也只是本机网络状态。
+async fn guard(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let is_write = !matches!(req.method(), &axum::http::Method::GET);
+    if !is_write {
+        return next.run(req).await;
+    }
+
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    // 去掉端口后必须是 IP 字面量（IPv6 的 [::1] 也放行）
+    let hostname = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    let hostname = hostname.trim_start_matches('[').trim_end_matches(']');
+    if !hostname.is_empty() && hostname.parse::<std::net::IpAddr>().is_err() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "Host 必须是 IP 字面量 —— 拒绝可能的 DNS rebinding".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if !state.authorize(presented) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "需要 Authorization: Bearer <token>".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    next.run(req).await
+}
+
+#[derive(Serialize)]
+struct ApiError {
+    error: String,
+}
+
+// ---------- 新建作用域 ----------
+
+/// 界面上建作用域用的最小参数集。
+///
+/// 子网由 `serverIp` 和 `prefix` 推出 —— 让人填网段容易和监听器对不上，
+/// 而对不上就是"收得到请求也发不出应答"。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NewScope {
+    name: Option<String>,
+    server_ip: Ipv4Addr,
+    prefix: u8,
+    pool_start: Ipv4Addr,
+    pool_end: Ipv4Addr,
+    router: Option<Ipv4Addr>,
+    #[serde(default)]
+    dns: Vec<Ipv4Addr>,
+    lease_secs: Option<u32>,
+}
+
+async fn post_scope(State(state): State<AppState>, Json(req): Json<NewScope>) -> Response {
+    if req.prefix == 0 || req.prefix > 32 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "前缀长度要在 1-32 之间".into(),
+            }),
+        )
+            .into_response();
+    }
+    let Some(pool) = lessor_core::addr::Range::new(req.pool_start, req.pool_end) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "地址池起止顺序不对".into(),
+            }),
+        )
+            .into_response();
+    };
+
+    let mask = u32::MAX
+        .checked_shl(32 - u32::from(req.prefix))
+        .unwrap_or(0);
+    let subnet = Ipv4Addr::from(u32::from(req.server_ip) & mask);
+
+    let mut scope = lessor_core::Scope::new(
+        0,
+        req.name.unwrap_or_else(|| "新建".into()),
+        subnet,
+        req.prefix,
+    );
+    scope.pools = vec![pool];
+    scope.router = req.router;
+    scope.dns = req.dns;
+    if let Some(secs) = req.lease_secs {
+        scope.lease_secs = secs;
+        scope.offer_secs = 30.min(secs);
+    }
+
+    match state.add_scope(scope).await {
+        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
+        Err(problems) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: problems.join("；"),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 // ---------- 状态 ----------
@@ -52,6 +188,8 @@ struct StateResponse {
     uptime_secs: u64,
     scopes: Vec<ScopeStatus>,
     listeners: Vec<Listener>,
+    /// 写操作是否需要令牌。界面据此决定要不要提示输入。
+    auth_required: bool,
 }
 
 async fn get_state(State(st): State<AppState>) -> Json<StateResponse> {
@@ -61,6 +199,7 @@ async fn get_state(State(st): State<AppState>) -> Json<StateResponse> {
         uptime_secs: now().saturating_sub(st.started_at),
         scopes: st.scope_status().await,
         listeners: st.listeners().await,
+        auth_required: st.auth_enabled(),
     })
 }
 

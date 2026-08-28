@@ -12,12 +12,12 @@ mod ui;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::config::Config;
+use crate::config::{Config, Listener};
 use crate::dhcp::Ports;
 use crate::state::AppState;
 
@@ -100,10 +100,20 @@ struct Cli {
     /// 过期租约的回收间隔（秒）
     #[arg(long, default_value_t = 30, value_name = "秒")]
     reap_secs: u64,
+
+    /// 不带作用域启动，等着在界面上建。桌面端与"界面优先"的用法走这条 ——
+    /// 零作用域时不应答任何请求，安全。
+    #[arg(long)]
+    serve_empty: bool,
+
+    /// 管理接口的访问令牌。给了就强制校验（写操作必须带），
+    /// 不给则只有本机能用（默认只听 127.0.0.1）。
+    #[arg(long, value_name = "TOKEN", env = "LESSOR_TOKEN")]
+    token: Option<String>,
 }
 
 impl Cli {
-    fn into_config(self) -> Result<(Config, Ports, SocketAddr, u64)> {
+    fn into_config(self) -> Result<(Config, Ports, SocketAddr, u64, Option<String>)> {
         let ports = Ports {
             server: self.dhcp_port,
             client: self.client_port,
@@ -112,13 +122,23 @@ impl Cli {
         let cfg = match &self.config {
             Some(path) => Config::load(path)?,
             None => {
-                let listen = self
-                    .listen
-                    .context("没给 --config 时必须给 --listen（本机在该网段上的地址）")?;
-                let pool = self
-                    .pool
-                    .as_deref()
-                    .context("没给 --config 时必须给 --pool，形如 192.168.88.10-192.168.88.20")?;
+                // --serve-empty 时监听器也可以先不建：网卡在界面上选
+                let listen = match (self.listen, self.serve_empty) {
+                    (Some(ip), _) => Some(ip),
+                    (None, true) => None,
+                    (None, false) => bail!(
+                        "没给 --config 时必须给 --listen（本机在该网段上的地址），                         或者用 --serve-empty 先起服务再在界面上选网卡"
+                    ),
+                };
+                // --serve-empty 时允许没有地址池：先把服务和监听器起起来，
+                // 作用域在界面上建
+                let pool = match (self.pool.as_deref(), self.serve_empty) {
+                    (Some(p), _) => Some(config::parse_range(p)?),
+                    (None, true) => None,
+                    (None, false) => bail!(
+                        "没给 --config 时必须给 --pool（形如 192.168.88.10-192.168.88.20），                         或者用 --serve-empty 先起服务再在界面上建作用域"
+                    ),
+                };
                 let reservations = self
                     .reservations
                     .iter()
@@ -127,7 +147,7 @@ impl Cli {
                 Config::from_quick(config::Quick {
                     server_ip: listen,
                     prefix: self.prefix,
-                    pool: config::parse_range(pool)?,
+                    pool,
                     router: self.router,
                     dns: self.dns.clone(),
                     lease_secs: self.lease_secs,
@@ -151,7 +171,7 @@ impl Cli {
                 })?
             }
         };
-        Ok((cfg, ports, self.http, self.reap_secs))
+        Ok((cfg, ports, self.http, self.reap_secs, self.token.clone()))
     }
 }
 
@@ -163,7 +183,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let (cfg, ports, http_addr, reap_secs) = Cli::parse().into_config()?;
+    let (cfg, ports, http_addr, reap_secs, token) = Cli::parse().into_config()?;
 
     // 非 Linux 上没有把 socket 钉在网卡上的办法，多监听器时无法判断
     // 包从哪块网卡进来，可能把请求算到错误的作用域上。
@@ -185,15 +205,46 @@ async fn main() -> Result<()> {
         );
     }
 
-    let state = AppState::new(cfg.clone());
+    if cfg.scopes.is_empty() {
+        info!("没有作用域，暂不应答任何 DHCP 请求 —— 在界面上新建一个即可开始服务");
+    }
+
+    // 界面上新建作用域时，可能需要在新网卡上起一个监听器 ——
+    // 通过这个 channel 送回来 spawn。
+    let (new_listener_tx, mut new_listener_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let state = AppState::new(cfg.clone())
+        .with_token(token)
+        .with_listener_spawner(new_listener_tx);
 
     let mut tasks = tokio::task::JoinSet::new();
 
+    let spawn_listener =
+        |tasks: &mut tokio::task::JoinSet<()>, st: AppState, listener: Listener| {
+            tasks.spawn(async move {
+                if let Err(e) = dhcp::serve(st, listener, ports).await {
+                    error!(error = %e, "监听器退出");
+                }
+            });
+        };
+
     for listener in cfg.listeners {
+        spawn_listener(&mut tasks, state.clone(), listener);
+    }
+
+    {
+        // 运行时新增的监听器
         let st = state.clone();
+        let mut extra = tokio::task::JoinSet::new();
         tasks.spawn(async move {
-            if let Err(e) = dhcp::serve(st, listener, ports).await {
-                error!(error = %e, "监听器退出");
+            while let Some(l) = new_listener_rx.recv().await {
+                info!(server_ip = %l.server_ip, "界面新增了作用域，起一个监听器");
+                let st2 = st.clone();
+                extra.spawn(async move {
+                    if let Err(e) = dhcp::serve(st2, l, ports).await {
+                        error!(error = %e, "监听器退出");
+                    }
+                });
             }
         });
     }

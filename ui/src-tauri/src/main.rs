@@ -1,26 +1,26 @@
 // 桌面外壳。
 //
-// 有意做成**先连、连不上才自带拉起**（attach-first）：
+// **双击就该直接进界面** —— 不给用户看"连不上，请先手工启动服务"那种
+// 把内部结构漏出来的页面。启动策略：
 //
-// 1. 启动先探测 lessord。已经在跑（比如装成了系统服务、或跑在机房另一台
-//    机器上）→ 只当客户端，什么都不拉起 —— 标准服务器场景不受影响。
-// 2. 没在跑 → 回退页上给一个"启动本机实例"的表单，选网卡后把随包自带的
-//    lessord 作为子进程拉起，窗口关闭时带走。
+// 1. 先探测 lessord。已经在跑（系统服务、或远程 LESSOR_URL）→ 只当客户端，
+//    不拉起、不接管、退出时也不碰它。
+// 2. 没在跑 → **静默拉起**随包自带的 lessord（`--serve-empty`：不带作用域
+//    启动，此时不应答任何 DHCP 请求，安全），然后直接进真界面。
+//    "还没有作用域"这件事由界面自己用空状态表单处理，不属于外壳的职责。
 //
-// 所以"自包含"不是架构：架构上服务始终独立，桌面端只是多了一个便利的
-// 启动器。拉起的实例明确是临时的现场实例，不冒充系统服务 ——
-// 要常驻就单独跑 lessord，桌面端会自动变回纯客户端。
+// 所以外壳不收集任何配置参数 —— 选网卡、填地址池都发生在应用里面。
+// 拉起的实例是临时的现场实例，窗口关闭即回收（强杀由 Job Object 兜底）。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
-use tauri::{Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
 /// 默认连本机的 lessord。可以用 `LESSOR_URL` 指向别处 ——
 /// 比如机房里另一台机器上的服务。
@@ -29,10 +29,6 @@ const DEFAULT_URL: &str = "http://127.0.0.1:8080";
 /// 由本外壳拉起的那个 lessord。窗口关闭时必须带走它 ——
 /// 留下一个没人管的 DHCP 服务器比没有服务更糟。
 struct LocalServer(Mutex<Option<Child>>);
-
-fn target_url() -> String {
-    std::env::var("LESSOR_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned())
-}
 
 /// 探一下服务在不在。
 ///
@@ -50,32 +46,6 @@ fn is_up(url: &str) -> bool {
     addrs
         .iter()
         .any(|a| TcpStream::connect_timeout(a, Duration::from_millis(400)).is_ok())
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IfaceChoice {
-    name: String,
-    addr: String,
-    prefix: u8,
-}
-
-/// 给"启动本机实例"的表单列可用网卡。复用 lessor-net，和 lessord 同一份逻辑。
-#[tauri::command]
-fn list_interfaces() -> Result<Vec<IfaceChoice>, String> {
-    let ifs = lessor_net::interfaces().map_err(|e| e.to_string())?;
-    Ok(ifs
-        .into_iter()
-        .filter(lessor_net::Interface::is_servable)
-        .filter_map(|i| {
-            let cidr = i.primary_ipv4()?;
-            Some(IfaceChoice {
-                name: i.name,
-                addr: cidr.addr.to_string(),
-                prefix: cidr.prefix,
-            })
-        })
-        .collect())
 }
 
 /// 随包自带的 lessord 在哪。
@@ -175,37 +145,18 @@ fn pick_http_port() -> u16 {
     8080
 }
 
-/// 拉起本机实例，返回它的界面地址。
+/// 静默拉起一个不带作用域的本机实例，返回它的界面地址。
 ///
-/// 参数在这里逐个校验成类型化的值再拼命令行 —— 表单来的东西不能直接透传。
-#[tauri::command]
-fn start_local(
-    state: State<'_, LocalServer>,
-    listen: String,
-    prefix: u8,
-    pool: String,
-) -> Result<String, String> {
-    let listen: Ipv4Addr = listen.trim().parse().map_err(|_| "监听地址不合法")?;
-    if !(1..=32).contains(&prefix) {
-        return Err("前缀长度要在 1-32 之间".into());
-    }
-    let (a, b) = pool
-        .split_once('-')
-        .ok_or("地址池要写成 起始-结束 的形式")?;
-    let a: Ipv4Addr = a.trim().parse().map_err(|_| "地址池起始地址不合法")?;
-    let b: Ipv4Addr = b.trim().parse().map_err(|_| "地址池结束地址不合法")?;
-
+/// `--serve-empty` 让它在没有作用域时也把监听器和 HTTP 接口起起来 ——
+/// 零作用域时不应答任何 DHCP 请求，所以这一步是安全的：
+/// 用户还没选网卡，我们绝不能先替他往网络上发地址。
+fn spawn_local(state: &LocalServer) -> Result<String, String> {
     let bin = sidecar_path().ok_or("没找到随包自带的 lessord，可能安装不完整")?;
     let port = pick_http_port();
     let http = format!("127.0.0.1:{port}");
 
     let mut cmd = Command::new(&bin);
-    cmd.arg("--listen")
-        .arg(listen.to_string())
-        .arg("--prefix")
-        .arg(prefix.to_string())
-        .arg("--pool")
-        .arg(format!("{a}-{b}"))
+    cmd.arg("--serve-empty")
         .arg("--http")
         .arg(&http)
         .stdin(Stdio::null())
@@ -220,13 +171,6 @@ fn start_local(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    // 重试场景：上一个还活着就先带走，别攒一堆孤儿进程
-    let mut guard = state.0.lock().map_err(|_| "内部状态错误")?;
-    if let Some(old) = guard.as_mut() {
-        let _ = old.kill();
-        let _ = old.wait();
-    }
-
     let mut child = cmd.spawn().map_err(|e| format!("启动失败: {e}"))?;
     // 强杀外壳时的兜底，正常退出路径见 main() 末尾
     jobkill::adopt(&child);
@@ -239,10 +183,7 @@ fn start_local(
             break;
         }
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(format!(
-                "lessord 启动后立即退出（{status}）。常见原因：端口 67 被占用，\
-                 或监听地址不是本机地址"
-            ));
+            return Err(format!("lessord 启动后立即退出（{status}）"));
         }
         if Instant::now() > deadline {
             let _ = child.kill();
@@ -251,37 +192,36 @@ fn start_local(
         std::thread::sleep(Duration::from_millis(120));
     }
 
-    *guard = Some(child);
+    if let Ok(mut guard) = state.0.lock() {
+        *guard = Some(child);
+    }
     Ok(url)
 }
 
 fn main() {
     tauri::Builder::default()
         .manage(LocalServer(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![list_interfaces, start_local])
         .setup(|app| {
-            let url = target_url();
+            let configured = std::env::var("LESSOR_URL").ok();
+            let url = configured.clone().unwrap_or_else(|| DEFAULT_URL.to_owned());
 
-            // 服务在就直接进界面；不在就先给回退页 ——
-            // 那上面既能等外部服务，也能一键拉起本机实例。
-            let start = if is_up(&url) {
-                WebviewUrl::External(url.parse()?)
+            // 已经在跑就 attach；没在跑才自己拉一个起来。
+            //
+            // 用户显式用 LESSOR_URL 指了地址时一律不代劳 —— 那是别人的服务，
+            // 起不起得来都不该由我们兜；连不上就让界面自己报错。
+            let target = if is_up(&url) || configured.is_some() {
+                url
             } else {
-                WebviewUrl::App("index.html".into())
+                let state = app.state::<LocalServer>();
+                spawn_local(&state).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
             };
 
-            let win = WebviewWindowBuilder::new(app, "main", start)
+            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target.parse()?))
                 .title("lessor")
                 .inner_size(1180.0, 780.0)
                 .min_inner_size(760.0, 520.0)
                 .build()?;
-
-            // 把目标地址传给回退页，它据此轮询并在服务起来后跳过去
-            let js = format!(
-                "window.__LESSOR_URL__ = {};",
-                serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".into())
-            );
-            let _ = win.eval(&js);
+            let _ = win;
 
             Ok(())
         })

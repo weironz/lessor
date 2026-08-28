@@ -42,12 +42,15 @@ impl Config {
     /// 启动前的自检。作用域自身的问题交给 `Scope::validate`，
     /// 这里只管跨对象的一致性。
     pub fn check(&self) -> Result<()> {
-        if self.listeners.is_empty() {
-            bail!("至少要配置一个监听器");
+        // 监听器可以为空，但仅当也没有作用域时 —— 那是"服务先起来、
+        // 网卡和地址池都等界面上选"的形态（--serve-empty）。
+        // 有作用域却没有监听器则是真的配错了：收得到请求也发不出应答。
+        if self.listeners.is_empty() && !self.scopes.is_empty() {
+            bail!("配了作用域却没有监听器 —— 收得到请求也发不出应答");
         }
-        if self.scopes.is_empty() {
-            bail!("至少要配置一个作用域");
-        }
+        // 作用域可以为空 —— 桌面端/界面优先的用法是先把服务起起来，
+        // 再在界面上建作用域。零作用域时不应答任何请求（NoMatchingScope），
+        // 这是安全的：宁可不发地址，也不能乱发。
 
         let mut problems = Vec::new();
 
@@ -98,10 +101,19 @@ impl Config {
         } else {
             u32::MAX.checked_shl(32 - u32::from(o.prefix)).unwrap_or(0)
         };
-        let subnet = Ipv4Addr::from(u32::from(o.server_ip) & mask);
+        // 没给本机地址就整个空着起 —— 网卡和地址池都在界面上选
+        let Some(server_ip) = o.server_ip else {
+            let cfg = Self {
+                listeners: Vec::new(),
+                scopes: Vec::new(),
+            };
+            cfg.check()?;
+            return Ok(cfg);
+        };
+        let subnet = Ipv4Addr::from(u32::from(server_ip) & mask);
 
         let mut scope = Scope::new(1, "quick", subnet, o.prefix);
-        scope.pools = vec![o.pool];
+        scope.pools = o.pool.into_iter().collect();
         scope.router = o.router;
         scope.dns = o.dns;
         scope.lease_secs = o.lease_secs;
@@ -113,10 +125,15 @@ impl Config {
 
         let cfg = Self {
             listeners: vec![Listener {
-                server_ip: o.server_ip,
+                server_ip,
                 iface: o.iface,
             }],
-            scopes: vec![scope],
+            // 没给地址池就不建作用域 —— 监听器照常起，等界面上建
+            scopes: if scope.pools.is_empty() {
+                Vec::new()
+            } else {
+                vec![scope]
+            },
         };
         cfg.check()?;
         Ok(cfg)
@@ -126,10 +143,11 @@ impl Config {
 /// 不写配置文件时，用命令行参数直接描述一个单网段。
 #[derive(Debug)]
 pub struct Quick {
-    /// 本机在该网段上的地址，子网由它和前缀推出
-    pub server_ip: Ipv4Addr,
+    /// 本机在该网段上的地址，子网由它和前缀推出。
+    /// None 表示先不建监听器（`--serve-empty`），等界面上选网卡。
+    pub server_ip: Option<Ipv4Addr>,
     pub prefix: u8,
-    pub pool: Range,
+    pub pool: Option<Range>,
     pub router: Option<Ipv4Addr>,
     pub dns: Vec<Ipv4Addr>,
     pub lease_secs: u32,
@@ -210,9 +228,9 @@ mod tests {
 
     fn quick() -> Config {
         Config::from_quick(Quick {
-            server_ip: ip(192, 168, 88, 1),
+            server_ip: Some(ip(192, 168, 88, 1)),
             prefix: 24,
-            pool: Range::new(ip(192, 168, 88, 10), ip(192, 168, 88, 20)).unwrap(),
+            pool: Range::new(ip(192, 168, 88, 10), ip(192, 168, 88, 20)),
             router: None,
             dns: vec![],
             lease_secs: 3600,
@@ -298,5 +316,46 @@ mod tests {
         let back: Config = serde_json::from_str(&j).unwrap();
         assert!(back.check().is_ok());
         assert_eq!(back.scopes[0].subnet, c.scopes[0].subnet);
+    }
+
+    /// `--serve-empty` 的形态：没有地址池时不建作用域，但监听器照常起。
+    ///
+    /// 这是"双击直接进界面"的前提 —— 服务先跑起来，作用域在界面上建。
+    /// 零作用域时不应答任何请求（NoMatchingScope），所以是安全的。
+    #[test]
+    fn quick_without_pool_yields_a_listener_and_no_scope() {
+        let c = Config::from_quick(Quick {
+            server_ip: Some(ip(192, 168, 88, 1)),
+            prefix: 24,
+            pool: None,
+            router: None,
+            dns: Vec::new(),
+            lease_secs: 3600,
+            iface: None,
+            reservations: Vec::new(),
+            boot: None,
+            extra_options: Vec::new(),
+        })
+        .expect("没有地址池也应当能起服务");
+
+        assert!(c.scopes.is_empty(), "没给池就不该凭空造一个作用域");
+        assert_eq!(
+            c.listeners.len(),
+            1,
+            "监听器照常起，否则界面建完作用域也没人收包"
+        );
+    }
+
+    /// 空作用域的配置必须能过自检 —— 否则 `--serve-empty` 起不来。
+    #[test]
+    fn empty_scopes_pass_the_check() {
+        let c = Config {
+            listeners: vec![Listener {
+                server_ip: ip(192, 168, 88, 1),
+                iface: None,
+            }],
+            scopes: Vec::new(),
+        };
+        assert!(c.check().is_ok(), "零作用域是合法状态，不是配置错误");
     }
 }

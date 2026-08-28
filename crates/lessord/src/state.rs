@@ -47,6 +47,8 @@ pub enum Event {
     Packet(PacketEvent),
     /// 租约表发生变化，前端应重新拉取
     LeasesChanged,
+    /// 作用域发生变化，前端应重新拉取
+    ScopesChanged,
     /// 定期清理回收了若干条过期租约
     Reaped { count: usize },
 }
@@ -118,6 +120,12 @@ pub struct AppState {
     inner: Arc<RwLock<Inner>>,
     events: broadcast::Sender<Event>,
     pub started_at: UnixTime,
+    /// 管理接口令牌。`None` 表示未启用鉴权 —— 只在默认的
+    /// 仅监听 127.0.0.1 场景下可接受。
+    token: Option<Arc<str>>,
+    /// 运行时新增监听器的请求出口。界面上建完作用域后，得真的有人在
+    /// 那块网卡上收包，否则作用域建了也是摆设。
+    new_listener: Option<tokio::sync::mpsc::UnboundedSender<Listener>>,
 }
 
 /// 作用域的运行时快照，给界面用。
@@ -137,6 +145,32 @@ pub struct ScopeStatus {
 }
 
 impl AppState {
+    /// 设置管理接口令牌。给了就强制校验写操作。
+    #[must_use]
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token.map(Into::into);
+        self
+    }
+
+    /// 写操作是否放行。没配令牌时一律放行（默认只听环回口）。
+    pub fn authorize(&self, presented: Option<&str>) -> bool {
+        match &self.token {
+            None => true,
+            // 比较长度相同的字节，避免因提前返回泄露长度信息
+            Some(t) => presented.is_some_and(|p| {
+                p.len() == t.len()
+                    && p.bytes()
+                        .zip(t.bytes())
+                        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                        == 0
+            }),
+        }
+    }
+
+    pub fn auth_enabled(&self) -> bool {
+        self.token.is_some()
+    }
+
     pub fn new(cfg: Config) -> Self {
         // 容量给足，慢速的 WebSocket 客户端掉几条事件也不该拖住 DHCP 主循环
         let (events, _) = broadcast::channel(512);
@@ -148,7 +182,19 @@ impl AppState {
             })),
             events,
             started_at: now(),
+            token: None,
+            new_listener: None,
         }
+    }
+
+    /// 注册运行时新增监听器的出口。`main` 持有接收端并把它们 spawn 起来。
+    #[must_use]
+    pub fn with_listener_spawner(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<Listener>,
+    ) -> Self {
+        self.new_listener = Some(tx);
+        self
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -247,6 +293,74 @@ impl AppState {
 
     pub async fn listeners(&self) -> Vec<Listener> {
         self.inner.read().await.listeners.clone()
+    }
+
+    /// 运行时新建作用域。
+    ///
+    /// 会先跑 `Scope::validate` 与跨对象检查（必须有落在该网段的监听器、
+    /// 不能与已有作用域抢同一个监听器地址）—— 界面上填错不该把服务搞坏。
+    pub async fn add_scope(&self, mut scope: lessor_core::Scope) -> Result<ScopeId, Vec<String>> {
+        let mut g = self.inner.write().await;
+
+        let mut problems: Vec<String> = scope.validate().iter().map(ToString::to_string).collect();
+
+        // 该网段还没有监听器时自动补一个：本机在这个网段上的地址就是
+        // 它的 server_ip。找不到才是真的错 —— 那说明这台机器根本不在
+        // 用户填的网段里，建了作用域也收不到包。
+        let mut listener_to_start = None;
+        if !g.listeners.iter().any(|l| scope.contains(l.server_ip)) {
+            match lessor_net::interfaces().ok().and_then(|ifs| {
+                ifs.into_iter()
+                    .filter(lessor_net::Interface::is_servable)
+                    .find_map(|i| {
+                        let cidr = i.primary_ipv4()?;
+                        scope.contains(cidr.addr).then(|| (i.name, cidr.addr))
+                    })
+            }) {
+                Some((iface, server_ip)) => {
+                    listener_to_start = Some(Listener {
+                        server_ip,
+                        // 只有 Linux 用得上网卡名（SO_BINDTODEVICE）
+                        iface: cfg!(target_os = "linux").then_some(iface),
+                    });
+                }
+                None => problems.push(format!(
+                    "本机没有落在 {}/{} 里的地址 —— 建了作用域也收不到这个网段的请求",
+                    scope.subnet, scope.prefix
+                )),
+            }
+        }
+        if let Some(conflict) = g.server.scopes.iter().find(|s| {
+            g.listeners
+                .iter()
+                .any(|l| s.contains(l.server_ip) && scope.contains(l.server_ip))
+        }) {
+            problems.push(format!(
+                "与已有作用域「{}」抢同一个监听器地址",
+                conflict.name
+            ));
+        }
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+
+        // id 由服务端分配，前端不该猜
+        let id = ScopeId(g.server.scopes.iter().map(|s| s.id.0).max().unwrap_or(0) + 1);
+        scope.id = id;
+        g.server.scopes.push(scope);
+        if let Some(l) = listener_to_start.clone() {
+            g.listeners.push(l);
+        }
+        drop(g);
+
+        // 真正把收包任务起起来。发不出去（main 已退出）时作用域仍然建了，
+        // 但收不到包 —— 这种情况只在关停途中出现。
+        if let (Some(tx), Some(l)) = (&self.new_listener, listener_to_start) {
+            let _ = tx.send(l);
+        }
+
+        self.emit(Event::ScopesChanged);
+        Ok(id)
     }
 
     /// 手工撤销一条租约。返回是否真的删掉了。
