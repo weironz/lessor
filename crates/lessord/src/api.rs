@@ -340,9 +340,16 @@ struct StateResponse {
     listeners: Vec<Listener>,
     /// 写操作是否需要令牌。界面据此决定要不要提示输入。
     auth_required: bool,
+    /// "监听中但一个请求都没收到"时的提示；正常收包时为 `None`。
+    ///
+    /// 只写日志不够 —— 现场装机的人盯着的是界面，不是终端。
+    quiet_note: Option<String>,
+    /// 上面那条成立时该按什么顺序排查。界面直接展开给人看。
+    quiet_hint: Option<&'static str>,
 }
 
 async fn get_state(State(st): State<AppState>) -> Json<StateResponse> {
+    let quiet_note = crate::health::quiet_note(&st);
     Json(StateResponse {
         version: env!("CARGO_PKG_VERSION"),
         started_at: st.started_at,
@@ -350,6 +357,8 @@ async fn get_state(State(st): State<AppState>) -> Json<StateResponse> {
         scopes: st.scope_status().await,
         listeners: st.listeners().await,
         auth_required: st.auth_enabled(),
+        quiet_hint: quiet_note.is_some().then(crate::health::quiet_hint),
+        quiet_note,
     })
 }
 

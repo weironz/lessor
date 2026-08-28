@@ -23,3 +23,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 ipnet.workspace = true
+
+[dev-dependencies]
+# start_paused —— 让 --idle-exit 的计时逻辑可以确定性地测，
+# 不用真的在测试里等上几十秒
+tokio = { workspace = true, features = ["test-util"] }

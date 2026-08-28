@@ -7,6 +7,7 @@
 //! 流氓 DHCP 服务器），以及应答从 67 端口、从这块网卡发出去。
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder, v4::Message};
@@ -133,6 +134,101 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// 这个收包错误能不能忽略着接着跑。
+///
+/// `ConnectionReset` 是 Windows 特有的坑：给某个地址发过包之后，如果对方
+/// 回了 ICMP 端口不可达，**下一次 recv 会报 WSAECONNRESET** —— 明明是 UDP，
+/// 明明和这次要收的包毫无关系。把它当致命错误的话，网段上只要有一台机器
+/// 关着 DHCP 客户端，监听器就会不停重启。
+fn is_transient(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(e.kind(), WouldBlock | Interrupted | ConnectionReset)
+}
+
+/// 网卡还在不在。
+///
+/// 拔 USB 网卡和"socket 出了别的毛病"要区别对待：前者重建 socket 也没用，
+/// 得等网卡回来；后者退避重试就好。
+fn address_present(addr: std::net::Ipv4Addr) -> bool {
+    // 枚举失败时按"还在"处理：那是我们自己看不见，不是网卡没了，
+    // 报成"网卡被拔了"会把人带偏
+    lessor_net::interface_with_address(addr).map_or(true, |found| found.is_some())
+}
+
+/// 隔多久看一眼地址还在不在。
+///
+/// 拔网卡到停止应答之间的窗口就是这个值。给到 3 秒：再密没意义
+/// （人拔完插回来也要好几秒），再疏就会在窗口里发出一批
+/// server-identifier 已经失效的应答。
+const ADDR_POLL: Duration = Duration::from_secs(3);
+
+/// 一直把这个监听器维持住：网卡拔了就等它回来，出别的错就退避重试。
+///
+/// 现场用 USB 网卡是常态，拔插的那一下不该让服务从此哑掉 ——
+/// 尤其是无人值守跑着的时候。
+///
+/// **不能只等 socket 报错。** 各平台的绑法不一样，行为也不一样：
+/// Windows 绑的是具体地址，地址没了 socket 就废了；Linux 绑的是
+/// `0.0.0.0` + `SO_BINDTODEVICE`，**地址删掉之后 socket 照收不误**，
+/// 于是监听器会继续应答，而应答里的 server-identifier 指向一个本机
+/// 已经不存在的地址 —— 客户端拿着它去续租，永远等不到回音。
+/// 那比干脆停掉更糟。所以这里主动盯着地址在不在，不等 socket 说话。
+/// （实测：容器里 `ip addr del` 之后，socket 一声不吭。）
+pub async fn serve_forever(state: AppState, listener: Listener, ports: Ports) {
+    let addr = listener.server_ip;
+    // 退避从 1 秒起，翻倍到 30 秒封顶。收敛慢一点没关系，
+    // 重要的是别在一个起不来的网卡上把日志刷爆
+    let mut backoff = Duration::from_secs(1);
+
+    loop {
+        if !address_present(addr) {
+            // 说清楚是"地址没了"，而不是含糊的"监听失败" ——
+            // 现场看到这句就知道该去插网卡，不用查别的
+            warn!(
+                server_ip = %addr,
+                "本机上找不到这个地址了（网卡被拔掉或被禁用？）—— 停止应答，等它回来"
+            );
+            while !address_present(addr) {
+                tokio::time::sleep(ADDR_POLL).await;
+            }
+            info!(server_ip = %addr, "地址回来了，重新开始监听");
+            backoff = Duration::from_secs(1);
+        }
+
+        let ran = tokio::select! {
+            r = serve(state.clone(), listener.clone(), ports) => Some(r),
+            // 地址一没就立刻收手。select 结束会把 socket 一起丢掉，
+            // 这正是我们要的 —— 网卡回来时要重新绑一次
+            _ = wait_until_address_gone(addr) => None,
+        };
+
+        match ran {
+            // 地址没了，回到循环开头去等
+            None => continue,
+            Some(Ok(())) => return,
+            Some(Err(e)) => {
+                warn!(
+                    server_ip = %addr, error = %e,
+                    retry_in_secs = backoff.as_secs(),
+                    "监听器出错，稍后重试"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+            }
+        }
+    }
+}
+
+/// 一直等到这个地址从本机上消失。
+async fn wait_until_address_gone(addr: std::net::Ipv4Addr) {
+    loop {
+        tokio::time::sleep(ADDR_POLL).await;
+        if !address_present(addr) {
+            return;
+        }
+    }
+}
+
 /// 跑一个监听器，直到出错。
 pub async fn serve(state: AppState, listener: Listener, ports: Ports) -> Result<()> {
     let sock = socket_for(ports.server, listener.server_ip, listener.iface.as_deref())?;
@@ -149,9 +245,15 @@ pub async fn serve(state: AppState, listener: Listener, ports: Ports) -> Result<
     loop {
         let (n, from) = match sock.recv_from(&mut buf).await {
             Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "收包失败");
+            Err(e) if is_transient(&e) => {
+                debug!(error = %e, "收包被打断，继续");
                 continue;
+            }
+            Err(e) => {
+                // 网卡被拔掉时报的就是这一类。以前这里也只是 warn + continue，
+                // socket 已经废了却接着循环 —— 会变成一个刷屏的死循环。
+                // 交给上层：那里知道地址还在不在，能决定是等网卡回来还是重试。
+                return Err(anyhow::Error::new(e).context("收包失败，监听器无法继续"));
             }
         };
 

@@ -82,6 +82,18 @@
   <p class="err">接口出错：{error}</p>
 {/if}
 
+<!--
+  已经在监听、却一个请求都没收到。这不是错误（网段上可能真的还没人要地址），
+  所以用 warn 而不是 err；但现场十有八九是防火墙，值得主动摆出来 ——
+  装机的人盯着的是这个界面，不是终端里的日志。
+-->
+{#if state?.quietNote}
+  <details class="warn" open>
+    <summary>{state.quietNote}</summary>
+    <pre>{state.quietHint}</pre>
+  </details>
+{/if}
+
 {#if needsSetup}
   <NewScope oncreated={refresh} />
 {:else}
@@ -145,6 +157,24 @@
     color: var(--danger);
     border-bottom: 1px solid var(--danger);
     font-size: 13px;
+  }
+  /* 提醒，不是错误 —— 网段上真的没人要地址时它也会出现 */
+  .warn {
+    padding: 8px 20px;
+    background: var(--warn-bg);
+    color: var(--warn);
+    border-bottom: 1px solid var(--warn);
+    font-size: 13px;
+  }
+  .warn summary {
+    cursor: pointer;
+  }
+  .warn pre {
+    margin: 8px 0 0;
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-x: auto;
   }
   nav {
     display: flex;

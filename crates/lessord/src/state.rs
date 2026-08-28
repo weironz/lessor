@@ -255,13 +255,19 @@ pub struct Counters {
     pub acks: std::sync::atomic::AtomicU64,
     pub naks: std::sync::atomic::AtomicU64,
     pub drops: std::sync::atomic::AtomicU64,
+    /// 最后一次收到报文的时刻（Unix 秒）。0 表示一个都没收到过。
+    ///
+    /// "监听中但一个请求都没有"是现场最常见的故障形态，而它和"网段上
+    /// 暂时没有客户端"从服务端看长得一模一样。这个时间戳是唯一能把两者
+    /// 分开的依据，也是空闲自动退出的判据。
+    pub last_packet_at: std::sync::atomic::AtomicU64,
 }
 
 impl Counters {
     fn bump(c: &std::sync::atomic::AtomicU64) {
         c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    fn get(c: &std::sync::atomic::AtomicU64) -> u64 {
+    pub fn get(c: &std::sync::atomic::AtomicU64) -> u64 {
         c.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
@@ -438,6 +444,9 @@ impl AppState {
         drop(g);
 
         Counters::bump(&self.counters.packets);
+        self.counters
+            .last_packet_at
+            .store(at, std::sync::atomic::Ordering::Relaxed);
         match &outcome {
             Outcome::Reply(r) => match reply_label(&r.msg) {
                 "OFFER" => Counters::bump(&self.counters.offers),

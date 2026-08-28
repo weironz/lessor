@@ -7,6 +7,7 @@ mod api;
 mod config;
 mod conflict;
 mod dhcp;
+mod health;
 mod service;
 mod sqlite;
 mod state;
@@ -135,6 +136,14 @@ struct Cli {
     #[arg(long)]
     no_probe: bool,
 
+    /// 闲置这么多秒后自行退出。给现场临时使用：装完机走人，
+    /// 不用记得回来关掉它。常驻部署不要开 —— 没人要地址不代表服务该消失。
+    ///
+    /// 下限 5 秒：再小的值只会在服务刚起来、客户端还没来得及发第一个
+    /// DISCOVER 时就把自己关掉。
+    #[arg(long, value_name = "秒", value_parser = clap::value_parser!(u64).range(5..))]
+    idle_exit: Option<u64>,
+
     /// 管理接口的访问令牌。给了就强制校验（写操作必须带），
     /// 不给则只有本机能用（默认只听 127.0.0.1）。
     #[arg(long, value_name = "TOKEN", env = "LESSOR_TOKEN")]
@@ -152,6 +161,7 @@ struct Started {
     lease_db: Option<PathBuf>,
     config_path: Option<PathBuf>,
     no_probe: bool,
+    idle_exit: Option<u64>,
 }
 
 impl Cli {
@@ -223,6 +233,7 @@ impl Cli {
             lease_db: self.lease_db.clone(),
             config_path: self.config.clone(),
             no_probe: self.no_probe,
+            idle_exit: self.idle_exit,
         })
     }
 }
@@ -286,6 +297,7 @@ async fn main() -> Result<()> {
         lease_db,
         config_path,
         no_probe,
+        idle_exit,
     } = cli.into_config()?;
 
     // 非 Linux 上没有把 socket 钉在网卡上的办法，多监听器时无法判断
@@ -333,11 +345,7 @@ async fn main() -> Result<()> {
 
     let spawn_listener =
         |tasks: &mut tokio::task::JoinSet<()>, st: AppState, listener: Listener| {
-            tasks.spawn(async move {
-                if let Err(e) = dhcp::serve(st, listener, ports).await {
-                    error!(error = %e, "监听器退出");
-                }
-            });
+            tasks.spawn(dhcp::serve_forever(st, listener, ports));
         };
 
     // 后面探测同段其他 DHCP 要用，先留一份地址
@@ -355,11 +363,7 @@ async fn main() -> Result<()> {
             while let Some(l) = new_listener_rx.recv().await {
                 info!(server_ip = %l.server_ip, "界面新增了作用域，起一个监听器");
                 let st2 = st.clone();
-                extra.spawn(async move {
-                    if let Err(e) = dhcp::serve(st2, l, ports).await {
-                        error!(error = %e, "监听器退出");
-                    }
-                });
+                extra.spawn(dhcp::serve_forever(st2, l, ports));
             }
         });
     }
@@ -421,9 +425,35 @@ async fn main() -> Result<()> {
         });
     }
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => info!("收到中断，退出"),
-        _ = tasks.join_next() => error!("有任务提前退出"),
+    {
+        // "起来了但一个请求都没有"是现场第一大故障形态，而它安静得
+        // 和"网段上还没有客户端"一模一样。到点了主动说一句。
+        //
+        // 刻意不放进 tasks：收到第一个包之后它就功成身退正常返回了，
+        // 而 tasks 里任何一个任务结束都被当成故障。放进去的话，
+        // 服务会在"跑满一分钟且有流量"之后把自己判死。
+        let st = state.clone();
+        tokio::spawn(health::watch_quiet(st));
     }
-    Ok(())
+
+    // 空闲自动退出。没给 --idle-exit 时是一个永不返回的 future，
+    // 让下面的 select 结构保持一致
+    let idle = async {
+        match idle_exit {
+            Some(secs) => {
+                health::wait_until_idle(state.clone(), std::time::Duration::from_secs(secs)).await
+            }
+            None => std::future::pending().await,
+        }
+    };
+
+    tokio::select! {
+        _ = health::shutdown_signal() => Ok(()),
+        _ = idle => Ok(()),
+        // 任务提前结束是故障，不能报 exit 0 —— systemd 的 Restart=on-failure
+        // 和 Windows 服务的失败重启都只看退出码，报 0 就没人来救了
+        _ = tasks.join_next() => Err(anyhow::anyhow!(
+            "有任务提前退出，服务已不完整 —— 上面的日志里有原因"
+        )),
+    }
 }
