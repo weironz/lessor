@@ -6,6 +6,7 @@
 mod api;
 mod config;
 mod dhcp;
+mod sqlite;
 mod state;
 mod ui;
 
@@ -111,14 +112,30 @@ struct Cli {
     #[arg(long)]
     open: bool,
 
+    /// 租约落到这个 sqlite 文件，重启不丢。常驻部署应当给上。
+    /// 不给则租约只在内存里 —— 现场临时用正合适，关了不留痕。
+    #[arg(long, value_name = "路径")]
+    lease_db: Option<PathBuf>,
+
     /// 管理接口的访问令牌。给了就强制校验（写操作必须带），
     /// 不给则只有本机能用（默认只听 127.0.0.1）。
     #[arg(long, value_name = "TOKEN", env = "LESSOR_TOKEN")]
     token: Option<String>,
 }
 
+/// 解析命令行之后要交给主流程的一切。
+struct Started {
+    cfg: Config,
+    ports: Ports,
+    http: SocketAddr,
+    reap_secs: u64,
+    token: Option<String>,
+    open: bool,
+    lease_db: Option<PathBuf>,
+}
+
 impl Cli {
-    fn into_config(self) -> Result<(Config, Ports, SocketAddr, u64, Option<String>, bool)> {
+    fn into_config(self) -> Result<Started> {
         let ports = Ports {
             server: self.dhcp_port,
             client: self.client_port,
@@ -176,14 +193,15 @@ impl Cli {
                 })?
             }
         };
-        Ok((
+        Ok(Started {
             cfg,
             ports,
-            self.http,
-            self.reap_secs,
-            self.token.clone(),
-            self.open,
-        ))
+            http: self.http,
+            reap_secs: self.reap_secs,
+            token: self.token.clone(),
+            open: self.open,
+            lease_db: self.lease_db.clone(),
+        })
     }
 }
 
@@ -222,7 +240,15 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let (cfg, ports, http_addr, reap_secs, token, open) = Cli::parse().into_config()?;
+    let Started {
+        cfg,
+        ports,
+        http: http_addr,
+        reap_secs,
+        token,
+        open,
+        lease_db,
+    } = Cli::parse().into_config()?;
 
     // 非 Linux 上没有把 socket 钉在网卡上的办法，多监听器时无法判断
     // 包从哪块网卡进来，可能把请求算到错误的作用域上。
@@ -252,9 +278,17 @@ async fn main() -> Result<()> {
     // 通过这个 channel 送回来 spawn。
     let (new_listener_tx, mut new_listener_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let state = AppState::new(cfg.clone())
+    let mut state = AppState::new(cfg.clone())
         .with_token(token)
         .with_listener_spawner(new_listener_tx);
+
+    if let Some(path) = &lease_db {
+        let store = sqlite::SqliteStore::open(path)
+            .with_context(|| format!("租约库 {} 不可用", path.display()))?;
+        let restored = store.count();
+        state = state.with_store(state::Store::Sqlite(store));
+        info!(db = %path.display(), leases = restored, "租约持久化已启用");
+    }
 
     let mut tasks = tokio::task::JoinSet::new();
 

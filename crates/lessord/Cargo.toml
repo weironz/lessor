@@ -9,6 +9,7 @@ description = "lessor 的服务进程：DHCP 引擎 + HTTP/WebSocket API"
 [dependencies]
 lessor-core.workspace = true
 lessor-net.workspace = true
+rusqlite.workspace = true
 discovery.workspace = true
 rust-embed.workspace = true
 dhcproto.workspace = true

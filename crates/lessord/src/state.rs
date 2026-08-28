@@ -109,10 +109,92 @@ pub fn alloc_source_text(s: AllocSource) -> &'static str {
     }
 }
 
+/// 租约存储的两种形态。
+///
+/// 现场默认内存（关了就走，不留痕）；常驻用 sqlite。用枚举而不是
+/// `Box<dyn LeaseStore>` 是因为分派点只有一个、后端数量有限，
+/// 枚举更直白，也避免了 trait object 对未来 async 后端的约束。
+pub enum Store {
+    Memory(MemoryStore),
+    Sqlite(crate::sqlite::SqliteStore),
+}
+
+impl LeaseStore for Store {
+    fn get_by_ip(&self, scope: ScopeId, ip: Ipv4Addr) -> Option<Lease> {
+        match self {
+            Self::Memory(s) => s.get_by_ip(scope, ip),
+            Self::Sqlite(s) => s.get_by_ip(scope, ip),
+        }
+    }
+    fn get_by_client(&self, scope: ScopeId, client: &lessor_core::ClientId) -> Option<Lease> {
+        match self {
+            Self::Memory(s) => s.get_by_client(scope, client),
+            Self::Sqlite(s) => s.get_by_client(scope, client),
+        }
+    }
+    fn insert(&mut self, lease: Lease) {
+        match self {
+            Self::Memory(s) => s.insert(lease),
+            Self::Sqlite(s) => s.insert(lease),
+        }
+    }
+    fn try_claim(&mut self, lease: Lease, now: UnixTime) -> bool {
+        match self {
+            Self::Memory(s) => s.try_claim(lease, now),
+            Self::Sqlite(s) => s.try_claim(lease, now),
+        }
+    }
+    fn remove(&mut self, scope: ScopeId, ip: Ipv4Addr) -> Option<Lease> {
+        match self {
+            Self::Memory(s) => s.remove(scope, ip),
+            Self::Sqlite(s) => s.remove(scope, ip),
+        }
+    }
+    fn all(&self) -> Vec<Lease> {
+        match self {
+            Self::Memory(s) => s.all(),
+            Self::Sqlite(s) => s.all(),
+        }
+    }
+    fn reap(&mut self, now: UnixTime) -> usize {
+        match self {
+            Self::Memory(s) => s.reap(now),
+            Self::Sqlite(s) => s.reap(now),
+        }
+    }
+    fn clear_scope(&mut self, scope: ScopeId) -> usize {
+        match self {
+            Self::Memory(s) => s.clear_scope(scope),
+            Self::Sqlite(s) => s.clear_scope(scope),
+        }
+    }
+    fn usable_by(
+        &self,
+        scope: ScopeId,
+        ip: Ipv4Addr,
+        client: &lessor_core::ClientId,
+        now: UnixTime,
+    ) -> bool {
+        match self {
+            Self::Memory(s) => s.usable_by(scope, ip, client, now),
+            Self::Sqlite(s) => s.usable_by(scope, ip, client, now),
+        }
+    }
+}
+
+impl Store {
+    fn used_in(&self, scope: ScopeId, now: UnixTime) -> u64 {
+        match self {
+            Self::Memory(s) => s.used_in(scope, now),
+            Self::Sqlite(s) => s.used_in(scope, now),
+        }
+    }
+}
+
 struct Inner {
     server: ServerConfig,
     listeners: Vec<Listener>,
-    store: MemoryStore,
+    store: Store,
 }
 
 #[derive(Clone)]
@@ -182,6 +264,16 @@ impl AppState {
         self.token.is_some()
     }
 
+    /// 换用 sqlite 存储。常驻形态走这条 —— 重启不丢租约。
+    #[must_use]
+    pub fn with_store(self, store: Store) -> Self {
+        // 构造期独占，不会有别的持有者
+        if let Ok(mut g) = self.inner.try_write() {
+            g.store = store;
+        }
+        self
+    }
+
     pub fn new(cfg: Config) -> Self {
         // 容量给足，慢速的 WebSocket 客户端掉几条事件也不该拖住 DHCP 主循环
         let (events, _) = broadcast::channel(512);
@@ -189,7 +281,7 @@ impl AppState {
             inner: Arc::new(RwLock::new(Inner {
                 server: ServerConfig::new(cfg.scopes),
                 listeners: cfg.listeners,
-                store: MemoryStore::new(),
+                store: Store::Memory(MemoryStore::new()),
             })),
             events,
             started_at: now(),
@@ -275,7 +367,7 @@ impl AppState {
 
     pub async fn leases(&self) -> Vec<Lease> {
         let g = self.inner.read().await;
-        g.store.all().into_iter().cloned().collect()
+        g.store.all()
     }
 
     pub async fn scope_status(&self) -> Vec<ScopeStatus> {

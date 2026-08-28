@@ -32,6 +32,9 @@ anyhow    = "1"
 ipnet     = { version = "2", features = ["serde"] }
 network-interface = "2"
 rust-embed = { version = "8", features = ["mime-guess"] }
+# bundled：自带 SQLite 源码一起编，不依赖目标机器上的系统库 ——
+# "一个文件拷过去就跑"的形态容不下运行时依赖
+rusqlite  = { version = "0.40", features = ["bundled"] }
 
 [profile.release]
 opt-level = "z"

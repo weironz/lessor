@@ -387,25 +387,27 @@ fn on_discover<S: LeaseStore + ?Sized>(
     client: &ClientId,
     ctx: RecvCtx,
 ) -> Outcome {
-    let Some(alloc) = allocate(scope, store, client, requested_ip(req), ctx.now) else {
-        return Outcome::Drop(DropReason::PoolExhausted);
-    };
-
     let lease_secs = requested_lease_secs(req, scope);
 
-    // 用短超时占位，防止并发的 DISCOVER 拿到同一个地址。
+    // 挑地址的同时就占下来（短超时占位），防止并发的 DISCOVER 拿到同一个。
     // 客户端不跟进 REQUEST 的话，很快就会被回收。
-    store.insert(Lease {
-        ip: alloc.ip,
-        client: client.clone(),
-        scope_id: scope.id,
-        state: LeaseState::Offered,
-        expires_at: ctx.now + u64::from(scope.offer_secs),
-        hostname: hostname(req),
-        vendor_class: vendor_class(req),
-        created_at: ctx.now,
-        last_seen: ctx.now,
-    });
+    let hostname = hostname(req);
+    let vendor_class = vendor_class(req);
+    let Some(alloc) = allocate(scope, store, client, requested_ip(req), ctx.now, |ip| {
+        Lease {
+            ip,
+            client: client.clone(),
+            scope_id: scope.id,
+            state: LeaseState::Offered,
+            expires_at: ctx.now + u64::from(scope.offer_secs),
+            hostname: hostname.clone(),
+            vendor_class: vendor_class.clone(),
+            created_at: ctx.now,
+            last_seen: ctx.now,
+        }
+    }) else {
+        return Outcome::Drop(DropReason::PoolExhausted);
+    };
 
     let mut msg = base_reply(req, MessageType::Offer, ctx.server_ip);
     msg.set_yiaddr(alloc.ip);
@@ -476,30 +478,31 @@ fn on_request<S: LeaseStore + ?Sized>(
         return nak(scope.id, req, ctx.server_ip, "请求的地址不属于本子网");
     }
 
-    let Some(alloc) = allocate(scope, store, client, Some(claimed), ctx.now) else {
+    let lease_secs = requested_lease_secs(req, scope);
+    // 续租要保留最初的分配时间，界面上才看得出这台机器跟了多久
+    let created_at = store
+        .get_by_client(scope.id, client)
+        .map_or(ctx.now, |l| l.created_at);
+
+    let hostname = hostname(req);
+    let vendor_class = vendor_class(req);
+    let Some(alloc) = allocate(scope, store, client, Some(claimed), ctx.now, |ip| Lease {
+        ip,
+        client: client.clone(),
+        scope_id: scope.id,
+        state: LeaseState::Bound,
+        expires_at: ctx.now + u64::from(lease_secs),
+        hostname: hostname.clone(),
+        vendor_class: vendor_class.clone(),
+        created_at,
+        last_seen: ctx.now,
+    }) else {
         return nak(scope.id, req, ctx.server_ip, "无可用地址");
     };
     if alloc.ip != claimed {
         // 我们能给的和它要的不是同一个 —— 地址被别人占了，或者管理员改了保留
         return nak(scope.id, req, ctx.server_ip, "该地址已不属于此客户端");
     }
-
-    let lease_secs = requested_lease_secs(req, scope);
-    let created_at = store
-        .get_by_client(scope.id, client)
-        .map_or(ctx.now, |l| l.created_at);
-
-    store.insert(Lease {
-        ip: alloc.ip,
-        client: client.clone(),
-        scope_id: scope.id,
-        state: LeaseState::Bound,
-        expires_at: ctx.now + u64::from(lease_secs),
-        hostname: hostname(req),
-        vendor_class: vendor_class(req),
-        created_at,
-        last_seen: ctx.now,
-    });
 
     let mut msg = base_reply(req, MessageType::Ack, ctx.server_ip);
     msg.set_yiaddr(alloc.ip).set_ciaddr(req.ciaddr());

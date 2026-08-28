@@ -87,12 +87,19 @@ for name, mtype, want in (("DISCOVER", 1, 2), ("REQUEST", 3, 5)):
         sys.exit(1)
 
     label = {2: "OFFER", 5: "ACK"}[want]
+
+    # 掩码/网关/DNS/租期都可能没配 —— 服务端不配就不发是对的行为，
+    # 脚本不该因此崩掉（曾经无条件读 option 3，没配 --router 时 KeyError）
+    def addr(code):
+        return socket.inet_ntoa(hit[code]) if code in hit else "-"
+
+    lease = f"{struct.unpack('!I', hit[51])[0]}s" if 51 in hit else "-"
     print(
         f"<- 收到 {label}  yiaddr={offered}"
-        f"  mask={socket.inet_ntoa(hit[1])}"
-        f"  gw={socket.inet_ntoa(hit[3])}"
-        f"  dns={socket.inet_ntoa(hit[6]) if 6 in hit else '-'}"
-        f"  lease={struct.unpack('!I', hit[51])[0]}s"
+        f"  mask={addr(1)}"
+        f"  gw={addr(3)}"
+        f"  dns={addr(6)}"
+        f"  lease={lease}"
         f"  server={server_id}"
     )
     time.sleep(0.3)

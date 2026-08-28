@@ -7,16 +7,6 @@
 两种运行形态：**现场**（field，笔记本临时用）与**常驻**（resident，长期服务）。
 标注在各条目上。
 
-## M5 · 租约持久化（共用；常驻默认开）
-
-- sqlite 后端过 `LeaseStore` 全部 trait 测试；现场形态仍默认 ephemeral
-- **关键契约（唯一事后追改贵的点）**：分配语义定成**原子占位** ——
-  `try_claim(scope, ip, client) → 成功 | 已被占`，循环换候选。
-  这是 v1.0 共享 PG 多实例 HA 的前提，内存 / sqlite / PG 共用一份契约
-
-**验收**：kill -9 重启后同客户端 REQUEST 拿回原 IP、不遭 NAK；
-损坏的 db 文件启动时明确报错拒绝，而非静默清空。
-
 ## M6 · 常驻化（常驻）
 
 - systemd unit + Windows 服务注册；`--config` 一等公民 + 平滑重载

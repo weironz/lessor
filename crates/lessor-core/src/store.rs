@@ -16,14 +16,39 @@ use crate::lease::{Lease, LeaseState, UnixTime};
 use crate::scope::{Scope, ScopeId};
 
 /// 租约存储。
+///
+/// 查询返回**克隆**而不是引用：sqlite / PostgreSQL 这类后端每次查询都产生
+/// 新值，没有可借出去的东西。`Lease` 是个小结构体，克隆的代价远低于
+/// 让整个后端实现不出来。
 pub trait LeaseStore {
-    fn get_by_ip(&self, scope: ScopeId, ip: Ipv4Addr) -> Option<&Lease>;
-    fn get_by_client(&self, scope: ScopeId, client: &ClientId) -> Option<&Lease>;
+    fn get_by_ip(&self, scope: ScopeId, ip: Ipv4Addr) -> Option<Lease>;
+    fn get_by_client(&self, scope: ScopeId, client: &ClientId) -> Option<Lease>;
     /// 写入或覆盖。实现必须维护好双向索引的一致性。
     fn insert(&mut self, lease: Lease);
+
+    /// **原子占位**：地址此刻能给这个客户端用就占下并返回 `true`，
+    /// 已被别人占着就返回 `false`，调用方换下一个候选。
+    ///
+    /// 为什么不是"先 `usable_by` 判断、再 `insert`"：那两步之间存在窗口。
+    /// 单进程内存实现下窗口为零（`&mut self` 独占），但共享数据库的多实例
+    /// 部署里，两个实例会同时判定同一个地址可用、各自发出去 —— 同一个 IP
+    /// 给了两台机器。所以判断与占用必须是一步，由存储层保证原子性
+    /// （sqlite / PostgreSQL 上就是带唯一约束的条件插入）。
+    ///
+    /// 这个契约是 v1.0 多实例 HA 的前提，各后端共用同一份语义。
+    fn try_claim(&mut self, lease: Lease, now: UnixTime) -> bool {
+        // 默认实现给独占访问的后端用（`&mut self` 期间没有别人能插进来）。
+        // 共享存储必须重写成一条带条件的原子写。
+        if self.usable_by(lease.scope_id, lease.ip, &lease.client, now) {
+            self.insert(lease);
+            true
+        } else {
+            false
+        }
+    }
     fn remove(&mut self, scope: ScopeId, ip: Ipv4Addr) -> Option<Lease>;
     /// 全部租约，按 (作用域, IP) 排序，便于界面稳定展示。
-    fn all(&self) -> Vec<&Lease>;
+    fn all(&self) -> Vec<Lease>;
     /// 清掉已过期且不再需要保留的记录，返回清理条数。
     fn reap(&mut self, now: UnixTime) -> usize;
 
@@ -74,13 +99,13 @@ impl MemoryStore {
 }
 
 impl LeaseStore for MemoryStore {
-    fn get_by_ip(&self, scope: ScopeId, ip: Ipv4Addr) -> Option<&Lease> {
-        self.leases.get(&(scope, ip))
+    fn get_by_ip(&self, scope: ScopeId, ip: Ipv4Addr) -> Option<Lease> {
+        self.leases.get(&(scope, ip)).cloned()
     }
 
-    fn get_by_client(&self, scope: ScopeId, client: &ClientId) -> Option<&Lease> {
+    fn get_by_client(&self, scope: ScopeId, client: &ClientId) -> Option<Lease> {
         let ip = self.index.get(&(scope, client.clone()))?;
-        self.leases.get(&(scope, *ip))
+        self.leases.get(&(scope, *ip)).cloned()
     }
 
     fn insert(&mut self, lease: Lease) {
@@ -115,8 +140,8 @@ impl LeaseStore for MemoryStore {
         Some(lease)
     }
 
-    fn all(&self) -> Vec<&Lease> {
-        let mut v: Vec<&Lease> = self.leases.values().collect();
+    fn all(&self) -> Vec<Lease> {
+        let mut v: Vec<Lease> = self.leases.values().cloned().collect();
         v.sort_by_key(|l| (l.scope_id, l.ip));
         v
     }
@@ -162,43 +187,66 @@ pub struct Allocation {
     pub source: AllocSource,
 }
 
-/// 按 RFC 2131 §4.3.1 的优先级为客户端挑一个地址。
+/// 按 RFC 2131 §4.3.1 的优先级为客户端挑一个地址，**并当场占下它**。
+///
+/// 优先级：
 ///
 /// 1. 静态保留（管理员后加的保留应当立即生效，故优先于历史租约）
 /// 2. 该客户端原有的租约（即使已过期也优先给回同一个，减少地址漂移）
 /// 3. 客户端明确请求的地址（前提是可用）
 /// 4. 池里下一个空闲地址
-pub fn allocate<S: LeaseStore + ?Sized>(
+///
+/// 和"先挑后写"的区别不是风格：挑与占之间的窗口在共享存储的多实例部署里
+/// 会让两个实例把同一个 IP 发给两台机器。所以这里每一步候选都走
+/// [`LeaseStore::try_claim`]，占不到就换下一个 —— 由存储层保证原子性。
+///
+/// `make_lease` 把候选地址变成要写入的租约（OFFER 阶段是短占位、
+/// REQUEST 阶段是正式租约），因为两条路径的状态和到期时间不同。
+pub fn allocate<S, F>(
     scope: &Scope,
-    store: &S,
+    store: &mut S,
     client: &ClientId,
     requested: Option<Ipv4Addr>,
     now: UnixTime,
-) -> Option<Allocation> {
+    mut make_lease: F,
+) -> Option<Allocation>
+where
+    S: LeaseStore + ?Sized,
+    F: FnMut(Ipv4Addr) -> Lease,
+{
     let sid = scope.id;
 
+    // 静态保留优先，且不看占用情况 —— 管理员既然把地址钉给了这个客户端，
+    // 就该拿到。压在上面的别人的租约由上层（加保留时）负责清掉。
     if let Some(res) = scope.reservation_for(client) {
+        let ip = res.ip;
+        store.try_claim(make_lease(ip), now);
         return Some(Allocation {
-            ip: res.ip,
+            ip,
             source: AllocSource::Reservation,
         });
     }
 
+    // 续用原有地址。仍然走 try_claim —— 它对同一个客户端总是成功，
+    // 但顺带把租约刷新成新的状态和到期时间。
     if let Some(existing) = store.get_by_client(sid, client)
         && existing.state != LeaseState::Declined
         && scope.is_poolable(existing.ip)
         && !scope.is_reserved_for_other(existing.ip, client)
     {
-        return Some(Allocation {
-            ip: existing.ip,
-            source: AllocSource::Existing,
-        });
+        let ip = existing.ip;
+        if store.try_claim(make_lease(ip), now) {
+            return Some(Allocation {
+                ip,
+                source: AllocSource::Existing,
+            });
+        }
     }
 
     if let Some(want) = requested
         && scope.is_poolable(want)
         && !scope.is_reserved_for_other(want, client)
-        && store.usable_by(sid, want, client, now)
+        && store.try_claim(make_lease(want), now)
     {
         return Some(Allocation {
             ip: want,
@@ -206,15 +254,21 @@ pub fn allocate<S: LeaseStore + ?Sized>(
         });
     }
 
-    scope
+    // 池里逐个试。先收集候选再逐个占 —— poolable_addrs 借着 scope，
+    // 而 try_claim 要可变借 store，两者不能同时活着。
+    let candidates: Vec<Ipv4Addr> = scope
         .poolable_addrs()
-        .find(|ip| {
-            !scope.is_reserved_for_other(*ip, client) && store.usable_by(sid, *ip, client, now)
-        })
-        .map(|ip| Allocation {
-            ip,
-            source: AllocSource::Pool,
-        })
+        .filter(|ip| !scope.is_reserved_for_other(*ip, client))
+        .collect();
+    for ip in candidates {
+        if store.try_claim(make_lease(ip), now) {
+            return Some(Allocation {
+                ip,
+                source: AllocSource::Pool,
+            });
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -255,9 +309,22 @@ mod tests {
         bound_in(ScopeId(1), ip_addr, c, expires)
     }
 
+    /// 测试里的 allocate 包装：分配的同时写一条正式租约。
+    fn alloc(
+        s: &Scope,
+        t: &mut MemoryStore,
+        c: &ClientId,
+        want: Option<Ipv4Addr>,
+        now: UnixTime,
+    ) -> Option<Allocation> {
+        allocate(s, t, c, want, now, |addr| {
+            bound_in(s.id, addr, c, now + 3600)
+        })
+    }
+
     #[test]
     fn fresh_client_gets_lowest_free() {
-        let a = allocate(&scope(), &MemoryStore::new(), &client(1), None, 0).unwrap();
+        let a = alloc(&scope(), &mut MemoryStore::new(), &client(1), None, 0).unwrap();
         assert_eq!(a.ip, ip(10));
         assert_eq!(a.source, AllocSource::Pool);
     }
@@ -266,7 +333,7 @@ mod tests {
     fn second_client_skips_taken_address() {
         let mut t = MemoryStore::new();
         t.insert(bound(ip(10), &client(1), 1000));
-        let a = allocate(&scope(), &t, &client(2), None, 0).unwrap();
+        let a = alloc(&scope(), &mut t, &client(2), None, 0).unwrap();
         assert_eq!(a.ip, ip(11));
     }
 
@@ -274,7 +341,7 @@ mod tests {
     fn client_keeps_its_address_across_renewals() {
         let mut t = MemoryStore::new();
         t.insert(bound(ip(12), &client(1), 1000));
-        let a = allocate(&scope(), &t, &client(1), None, 500).unwrap();
+        let a = alloc(&scope(), &mut t, &client(1), None, 500).unwrap();
         assert_eq!(a.ip, ip(12));
         assert_eq!(a.source, AllocSource::Existing);
     }
@@ -283,7 +350,7 @@ mod tests {
     fn expired_lease_is_still_preferred_for_same_client() {
         let mut t = MemoryStore::new();
         t.insert(bound(ip(12), &client(1), 100));
-        let a = allocate(&scope(), &t, &client(1), None, 9999).unwrap();
+        let a = alloc(&scope(), &mut t, &client(1), None, 9999).unwrap();
         assert_eq!(a.ip, ip(12), "同一客户端回来时应拿回原地址");
     }
 
@@ -291,7 +358,7 @@ mod tests {
     fn expired_lease_can_be_taken_by_another_client() {
         let mut t = MemoryStore::new();
         t.insert(bound(ip(10), &client(1), 100));
-        let a = allocate(&scope(), &t, &client(2), None, 9999).unwrap();
+        let a = alloc(&scope(), &mut t, &client(2), None, 9999).unwrap();
         assert_eq!(a.ip, ip(10));
     }
 
@@ -305,7 +372,7 @@ mod tests {
         }];
         let mut t = MemoryStore::new();
         t.insert(bound(ip(10), &client(1), 9999));
-        let a = allocate(&s, &t, &client(1), None, 0).unwrap();
+        let a = alloc(&s, &mut t, &client(1), None, 0).unwrap();
         assert_eq!(a.ip, ip(12));
         assert_eq!(a.source, AllocSource::Reservation);
     }
@@ -318,20 +385,34 @@ mod tests {
             ip: ip(10),
             hostname: None,
         }];
-        let a = allocate(&s, &MemoryStore::new(), &client(2), None, 0).unwrap();
+        let a = alloc(&s, &mut MemoryStore::new(), &client(2), None, 0).unwrap();
         assert_eq!(a.ip, ip(11), "保留给别人的地址要跳过");
     }
 
     #[test]
     fn honours_requested_address_when_free() {
-        let a = allocate(&scope(), &MemoryStore::new(), &client(1), Some(ip(12)), 0).unwrap();
+        let a = alloc(
+            &scope(),
+            &mut MemoryStore::new(),
+            &client(1),
+            Some(ip(12)),
+            0,
+        )
+        .unwrap();
         assert_eq!(a.ip, ip(12));
         assert_eq!(a.source, AllocSource::Requested);
     }
 
     #[test]
     fn ignores_requested_address_outside_pool() {
-        let a = allocate(&scope(), &MemoryStore::new(), &client(1), Some(ip(99)), 0).unwrap();
+        let a = alloc(
+            &scope(),
+            &mut MemoryStore::new(),
+            &client(1),
+            Some(ip(99)),
+            0,
+        )
+        .unwrap();
         assert_eq!(a.ip, ip(10), "池外的请求应被忽略并回退到池分配");
     }
 
@@ -343,12 +424,16 @@ mod tests {
         l.expires_at = 3600;
         t.insert(l);
         assert_eq!(
-            allocate(&scope(), &t, &client(1), None, 0).unwrap().ip,
-            ip(11)
+            alloc(&scope(), &mut t, &client(1), None, 0).unwrap().ip,
+            ip(11),
+            "隔离期内应当跳过 .10"
         );
+        // 换一个客户端来验隔离期满 —— 用 client(1) 的话它已经占着 .11 了，
+        // 会走"续用原有地址"直接返回，根本试不到 .10。
         assert_eq!(
-            allocate(&scope(), &t, &client(1), None, 3600).unwrap().ip,
-            ip(10)
+            alloc(&scope(), &mut t, &client(2), None, 3600).unwrap().ip,
+            ip(10),
+            "隔离期满后 .10 应当重新可用"
         );
     }
 
@@ -358,7 +443,7 @@ mod tests {
         for (i, d) in (10u8..=12).enumerate() {
             t.insert(bound(ip(d), &client(i as u8 + 1), 9999));
         }
-        assert!(allocate(&scope(), &t, &client(99), None, 0).is_none());
+        assert!(alloc(&scope(), &mut t, &client(99), None, 0).is_none());
     }
 
     // ---------- 索引一致性 ----------
@@ -428,7 +513,7 @@ mod tests {
         let mut t = MemoryStore::new();
         // 作用域 2 里 .10 被占，不应影响作用域 1 的分配
         t.insert(bound_in(ScopeId(2), ip(10), &client(9), 9999));
-        let a = allocate(&scope(), &t, &client(1), None, 0).unwrap();
+        let a = alloc(&scope(), &mut t, &client(1), None, 0).unwrap();
         assert_eq!(a.ip, ip(10));
     }
 
@@ -440,5 +525,58 @@ mod tests {
         t.insert(bound_in(ScopeId(2), ip(10), &client(3), 9999));
         assert_eq!(t.used_in(ScopeId(1), 500), 1);
         assert_eq!(t.used_in(ScopeId(2), 500), 1);
+    }
+
+    // ---------- 原子占位契约 ----------
+
+    #[test]
+    fn try_claim_refuses_an_address_someone_else_holds() {
+        // 这条契约是多实例 HA 的地基：判断"能不能用"和"占下来"必须是一步。
+        // 拆成两步的话，共享存储上两个实例会同时判定可用、各自发出去。
+        let mut t = MemoryStore::new();
+        t.insert(bound(ip(10), &client(1), 9999));
+
+        assert!(
+            !t.try_claim(bound(ip(10), &client(2), 9999), 0),
+            "别人持有的地址必须占不下"
+        );
+        assert_eq!(
+            t.get_by_ip(ScopeId(1), ip(10)).unwrap().client,
+            client(1),
+            "占用失败不该动到原来那条租约"
+        );
+    }
+
+    #[test]
+    fn try_claim_succeeds_for_the_same_client_and_refreshes() {
+        // 同一个客户端回来续租：应当成功，并把租约刷新成新的到期时间
+        let mut t = MemoryStore::new();
+        t.insert(bound(ip(10), &client(1), 100));
+
+        assert!(t.try_claim(bound(ip(10), &client(1), 5000), 50));
+        assert_eq!(t.get_by_ip(ScopeId(1), ip(10)).unwrap().expires_at, 5000);
+    }
+
+    #[test]
+    fn try_claim_takes_over_an_expired_lease() {
+        let mut t = MemoryStore::new();
+        t.insert(bound(ip(10), &client(1), 100));
+        // 过期之后别人可以接手
+        assert!(t.try_claim(bound(ip(10), &client(2), 9999), 200));
+        assert_eq!(t.get_by_ip(ScopeId(1), ip(10)).unwrap().client, client(2));
+    }
+
+    #[test]
+    fn allocation_skips_addresses_that_cannot_be_claimed() {
+        // 池里前两个都被占着，分配应当一路试到第三个 —— 而不是挑中就撞车
+        let mut t = MemoryStore::new();
+        t.insert(bound(ip(10), &client(8), 9999));
+        t.insert(bound(ip(11), &client(9), 9999));
+
+        let a = alloc(&scope(), &mut t, &client(1), None, 0).unwrap();
+        assert_eq!(a.ip, ip(12));
+        assert_eq!(a.source, AllocSource::Pool);
+        // 而且它真的占下了，不是只挑不占
+        assert_eq!(t.get_by_ip(ScopeId(1), ip(12)).unwrap().client, client(1));
     }
 }
