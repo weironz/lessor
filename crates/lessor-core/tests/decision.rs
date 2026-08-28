@@ -1035,3 +1035,66 @@ fn relayed_request_after_offer_is_acked() {
     assert_eq!(r.msg.yiaddr(), offered);
     assert_eq!(r.dest, ReplyDest::Relay(RELAY));
 }
+
+#[test]
+fn option_82_is_echoed_back_verbatim() {
+    // RFC 3046 §2.2 的 MUST：应答必须原样带回中继代理信息。
+    //
+    // 交换机把"客户端接在哪个物理端口"塞进 option 82，应答回来时靠它把包
+    // 送回那个端口。不带回去，有的中继代理会直接丢掉应答 —— 现象是服务端
+    // 日志一行行"已应答"、客户端一个都收不到，而且只在真交换机上出现。
+    use dhcproto::v4::relay::{RelayAgentInformation, RelayInfo};
+
+    let mut info = RelayAgentInformation::default();
+    info.insert(RelayInfo::AgentCircuitId(b"Gi1/0/24".to_vec()));
+    info.insert(RelayInfo::AgentRemoteId(b"sw-rack7".to_vec()));
+
+    let (c, mut t) = (cfg_with_relay(), MemoryStore::new());
+    let mut m = via_relay(req(MessageType::Discover, 1));
+    m.opts_mut()
+        .insert(DhcpOption::RelayAgentInformation(info.clone()));
+
+    let out = handle(&c, &mut t, &m, ctx(100));
+    let r = out.reply().expect("应当回 OFFER");
+
+    assert_eq!(
+        r.msg.opts().get(OptionCode::RelayAgentInformation),
+        Some(&DhcpOption::RelayAgentInformation(info)),
+        "option 82 必须一个字节不改地带回去"
+    );
+}
+
+#[test]
+fn option_82_is_echoed_on_nak_too() {
+    // "所有应答"包括 NAK —— 客户端换网段后拿到的正是 NAK，
+    // 那一条送不回去的话它会一直重试到超时。
+    use dhcproto::v4::relay::{RelayAgentInformation, RelayInfo};
+
+    let mut info = RelayAgentInformation::default();
+    info.insert(RelayInfo::AgentCircuitId(b"Gi1/0/24".to_vec()));
+
+    let (c, mut t) = (cfg_with_relay(), MemoryStore::new());
+    let mut m = via_relay(req(MessageType::Request, 1));
+    // 请求一个不属于该网段的地址 —— 必然 NAK
+    m.opts_mut()
+        .insert(DhcpOption::RequestedIpAddress(Ipv4Addr::new(172, 16, 0, 9)));
+    m.opts_mut()
+        .insert(DhcpOption::RelayAgentInformation(info.clone()));
+
+    let out = handle(&c, &mut t, &m, ctx(100));
+    let r = out.reply().expect("应当回 NAK");
+    assert_eq!(msg_type(&r.msg), MessageType::Nak);
+    assert_eq!(
+        r.msg.opts().get(OptionCode::RelayAgentInformation),
+        Some(&DhcpOption::RelayAgentInformation(info)),
+    );
+}
+
+#[test]
+fn direct_clients_get_no_option_82() {
+    // 没有中继的时候不能凭空造一个出来
+    let (c, mut t) = (cfg(), MemoryStore::new());
+    let out = handle(&c, &mut t, &req(MessageType::Discover, 1), ctx(100));
+    let r = out.reply().unwrap();
+    assert_eq!(r.msg.opts().get(OptionCode::RelayAgentInformation), None);
+}

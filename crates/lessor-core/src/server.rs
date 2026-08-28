@@ -222,6 +222,18 @@ fn base_reply(req: &Message, kind: MessageType, server_id: Ipv4Addr) -> Message 
         .set_chaddr(req.chaddr());
     m.opts_mut().insert(DhcpOption::MessageType(kind));
     m.opts_mut().insert(DhcpOption::ServerIdentifier(server_id));
+
+    // option 82（中继代理信息）必须原样回带 —— RFC 3046 §2.2 的 MUST。
+    //
+    // 交换机在转发时把客户端接在哪个物理端口塞进这个选项，应答回来时靠它
+    // 把包送回那个端口。不带回去，有的中继代理直接把应答丢掉：现象是
+    // "服务端日志一行行已应答，客户端一个都收不到"，而且只在真交换机上
+    // 出现，实验室里两台机器对着打是复现不出来的。
+    //
+    // 内容我们不解释、也不改，原样搬过去 —— 那是中继和它自己之间的约定。
+    if let Some(relay_info) = req.opts().get(OptionCode::RelayAgentInformation) {
+        m.opts_mut().insert(relay_info.clone());
+    }
     m
 }
 
