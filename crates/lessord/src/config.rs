@@ -60,12 +60,20 @@ impl Config {
             }
         }
 
-        // 每个作用域都该有一个本机地址落在它的网段里，否则收到请求也发不出应答
+        // 每个作用域都该有一个本机地址落在它的网段里，否则收到请求也发不出应答。
+        //
+        // 例外是经中继服务的网段：本机在它上面本来就没有地址，应答单播回
+        // giaddr 由中继放回线上。所以这类作用域必须显式标 viaRelay ——
+        // 不能一刀切放开，否则"配漏了监听器"这个最常见的配置错误就没人拦了。
         for s in &self.scopes {
+            if s.via_relay {
+                continue;
+            }
             if !self.listeners.iter().any(|l| s.contains(l.server_ip)) {
                 problems.push(format!(
                     "作用域 {}（{}/{}）没有对应的监听器 —— \
-                     需要一个 server_ip 落在这个网段内",
+                     需要一个 server_ip 落在这个网段内；\
+                     如果这个网段是经 DHCP 中继服务的，请标上 viaRelay",
                     s.name, s.subnet, s.prefix
                 ));
             }
@@ -256,6 +264,33 @@ mod tests {
         c.listeners[0].server_ip = ip(10, 0, 0, 1);
         let err = c.check().unwrap_err().to_string();
         assert!(err.contains("没有对应的监听器"), "实际: {err}");
+        // 报错要顺带指出中继这条路，否则跨网段部署的人会卡在这里
+        assert!(err.contains("viaRelay"), "实际: {err}");
+    }
+
+    #[test]
+    fn a_relayed_scope_may_have_no_listener_of_its_own() {
+        // 经中继服务的网段，本机在它上面本来就没有地址 —— 那不是配漏了。
+        // 标了 viaRelay 就该放行，否则跨网段根本配不出来。
+        let mut c = quick();
+        let mut relayed = lessor_core::Scope::new(2, "branch", ip(10, 20, 30, 0), 24);
+        relayed.pools = vec![Range::new(ip(10, 20, 30, 100), ip(10, 20, 30, 200)).unwrap()];
+        relayed.via_relay = true;
+        c.scopes.push(relayed);
+        assert!(c.check().is_ok(), "{:?}", c.check().unwrap_err());
+    }
+
+    #[test]
+    fn a_relayed_scope_still_needs_someone_to_receive_packets() {
+        // viaRelay 免掉的是"本网段要有监听器"，不是"一个监听器都不用有" ——
+        // 中继会把报文单播到我们某个监听器上，没有监听器就谁也收不到。
+        // 这条由既有的"配了作用域却没有监听器"兜住，这里钉住 viaRelay
+        // 没有把它一并绕过去。
+        let mut c = quick();
+        c.scopes[0].via_relay = true;
+        c.listeners.clear();
+        let err = c.check().unwrap_err().to_string();
+        assert!(err.contains("没有监听器"), "实际: {err}");
     }
 
     #[test]

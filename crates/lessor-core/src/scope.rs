@@ -167,6 +167,17 @@ pub struct Scope {
     pub dns: Vec<Ipv4Addr>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub domain: Option<String>,
+    /// 这个网段的请求是经中继代理转过来的，本机在它上面没有地址。
+    ///
+    /// 跨网段服务靠中继（路由器上的 `ip helper-address`）：客户端网段的
+    /// 网关把广播收下、`giaddr` 填成自己在那个网段上的地址、单播给我们。
+    /// 这种作用域**没有也不该有本地监听器** —— 标出来是为了让配置校验
+    /// 知道"缺监听器"是有意的，而不是配漏了。
+    ///
+    /// 下发给客户端的 option 54（server identifier）用的是收包那个监听器
+    /// 的地址；客户端续租时直接单播过来，靠路由到达，不再经过中继。
+    #[serde(default)]
+    pub via_relay: bool,
     /// 正式租期
     pub lease_secs: u32,
     /// OFFER 的占位时长 —— 客户端没跟上 REQUEST 时地址要能尽快回收
@@ -195,6 +206,7 @@ impl Scope {
             router: None,
             dns: Vec::new(),
             domain: None,
+            via_relay: false,
             lease_secs: 3600,
             offer_secs: 30,
             decline_quarantine_secs: 3600,

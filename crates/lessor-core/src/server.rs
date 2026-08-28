@@ -116,13 +116,22 @@ impl ServerConfig {
 
     /// 选出该请求归属的作用域。
     ///
-    /// 经中继来的报文用 `giaddr` 判断 —— 那是客户端所在网段的网关地址；
-    /// 直连的用收包网卡的本机地址。
+    /// 按三个线索依次判断客户端在哪个网段：
+    ///
+    /// 1. **`giaddr`** —— 经中继来的报文，那是客户端所在网段的网关地址。
+    /// 2. **`ciaddr`** —— 客户端已经持有的地址。**续租时只有这一条线索**：
+    ///    RENEW 是客户端直接单播给服务器的，不经过中继，所以没有 `giaddr`。
+    ///    漏了这一层的话，被中继网段的续租会退到第 3 条、选中收包监听器
+    ///    所在的那个**别的**网段，然后因为"请求的地址不属于本子网"被 NAK ——
+    ///    一个还在正常工作的客户端会被迫丢掉租约重来。
+    /// 3. **收包监听器的本机地址** —— 直连的常规情况。
     pub fn select_scope(&self, req: &Message, ctx: &RecvCtx) -> Result<&Scope, DropReason> {
-        let key = if req.giaddr().is_unspecified() {
-            ctx.server_ip
-        } else {
+        let key = if !req.giaddr().is_unspecified() {
             req.giaddr()
+        } else if !req.ciaddr().is_unspecified() {
+            req.ciaddr()
+        } else {
+            ctx.server_ip
         };
         let matched: Vec<&Scope> = self.scopes.iter().filter(|s| s.contains(key)).collect();
         match matched.iter().find(|s| s.enabled) {

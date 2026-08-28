@@ -53,7 +53,11 @@
           <dt>网段</dt>
           <dd class="mono">{s.subnet}/{s.prefix}</dd>
           <dt>本机地址</dt>
-          <dd class="mono">{s.serverIp ?? '—'}</dd>
+          <!-- 经中继服务的网段本机就没有地址，那是有意的；
+               直接显示 '—' 会看起来像配漏了监听器 -->
+          <dd class="mono">
+            {#if s.viaRelay}经 DHCP 中继{:else}{s.serverIp ?? '—'}{/if}
+          </dd>
           <dt>静态保留</dt>
           <dd class="mono">{s.reservations}</dd>
         </dl>

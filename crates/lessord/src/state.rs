@@ -319,8 +319,12 @@ pub struct ScopeStatus {
     pub capacity: u64,
     pub used: u64,
     pub reservations: usize,
-    /// 本机在该网段上的地址
+    /// 本机在该网段上的地址。经中继服务的网段这里是 `None` ——
+    /// 那不是配漏了，见下面的 `via_relay`。
     pub server_ip: Option<Ipv4Addr>,
+    /// 这个网段是经 DHCP 中继服务的。界面据此把"没有本机地址"标成
+    /// 有意为之，而不是显示成一个说不清的空值。
+    pub via_relay: bool,
 }
 
 impl AppState {
@@ -571,6 +575,7 @@ impl AppState {
                     .iter()
                     .find(|l| s.contains(l.server_ip))
                     .map(|l| l.server_ip),
+                via_relay: s.via_relay,
             })
             .collect()
     }

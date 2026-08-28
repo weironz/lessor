@@ -34,6 +34,13 @@
   以及测试台本身的坑（网卡型号、EFI NVRAM）—— 后者和 DHCP 无关，
   却最容易被误判成 DHCP 的问题。
 
+## 跨网段
+
+- [**DHCP 中继**](dhcp-relay.md) —— DHCP 首次交互是二层广播，跨网段靠
+  路由器上的 `ip helper-address`。怎么配 `viaRelay`、option 54 下发的是谁，
+  以及一个真出过问题的坑：**续租不经过中继**（没有 `giaddr` 只有 `ciaddr`），
+  判断网段时漏掉这一层会把正常工作的客户端 NAK 掉。
+
 ## 与别人共处一个网段
 
 - [**冲突检测**](dhcp-conflict-detection.md) ——

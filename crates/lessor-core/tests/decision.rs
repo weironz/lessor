@@ -933,3 +933,105 @@ fn clearing_one_scope_leaves_others_alone() {
             .is_some()
     );
 }
+
+// ---------- 跨网段：DHCP 中继 ----------
+//
+// 客户端和服务器不在同一个二层时，靠路由器上的中继代理
+// （`ip helper-address`）转发：网关把广播收下、把 giaddr 填成自己在客户端
+// 网段上的地址、单播给我们；我们按 giaddr 判断客户端在哪个网段，
+// 从那个网段的池里分地址，再单播回 giaddr:67 由中继放回线上。
+//
+// 既有测试覆盖了中继来的 DISCOVER（按 giaddr 选作用域、应答回中继）。
+// 这里补的是它没覆盖的两处：完整握手，以及**续租** —— 后者是真出过
+// 问题的地方，见下。
+
+/// 中继代理在被服务网段上的地址 —— 也就是那个网段的网关。
+const RELAY: Ipv4Addr = Ipv4Addr::new(10, 20, 30, 1);
+
+fn relayed_ip(d: u8) -> Ipv4Addr {
+    Ipv4Addr::new(10, 20, 30, d)
+}
+
+/// 一个经中继服务的网段。本机在它上面没有任何地址。
+fn relayed_scope() -> Scope {
+    let mut s = Scope::new(2, "branch", Ipv4Addr::new(10, 20, 30, 0), 24);
+    s.pools = vec![Range::new(relayed_ip(100), relayed_ip(102)).unwrap()];
+    s.router = Some(RELAY);
+    s.via_relay = true;
+    s.lease_secs = 3600;
+    s.offer_secs = 30;
+    s.decline_quarantine_secs = 600;
+    s
+}
+
+/// 直连网段 + 经中继网段并存 —— 真实部署就是这样。
+fn cfg_with_relay() -> ServerConfig {
+    ServerConfig::new(vec![lab_scope(), relayed_scope()])
+}
+
+/// 把一个请求变成"经中继转发过来的"。
+fn via_relay(mut m: Message) -> Message {
+    m.set_giaddr(RELAY);
+    // 中继转发时会递增 hops，且不置广播标志 —— 应答是单播给中继的
+    m.set_hops(1).set_flags(Flags::default());
+    m
+}
+
+#[test]
+fn renewal_from_a_relayed_client_finds_its_own_scope() {
+    // 这条钉的是最容易漏的一处：**续租不经过中继**。客户端 RENEW 时
+    // 直接单播给服务器，报文里没有 giaddr、只有 ciaddr。只按
+    // "giaddr 否则收包地址" 判断的话，会选中收包监听器所在的那个别的
+    // 网段，然后因为"请求的地址不属于本子网"回 NAK —— 一个正在正常
+    // 工作的客户端会被迫丢掉租约重来。
+    let (c, mut t) = (cfg_with_relay(), MemoryStore::new());
+    let held = relayed_ip(100);
+    t.insert(Lease {
+        ip: held,
+        client: ClientId::Mac(MacAddr(mac(1))),
+        scope_id: ScopeId(2),
+        state: LeaseState::Bound,
+        expires_at: 4000,
+        hostname: None,
+        vendor_class: None,
+        created_at: 0,
+        last_seen: 0,
+    });
+
+    // 注意：没有 giaddr（不经中继），只有 ciaddr
+    let mut m = req(MessageType::Request, 1);
+    m.set_ciaddr(held);
+    let out = handle(&c, &mut t, &m, ctx(2000));
+
+    let r = out.reply().expect("续租应当被 ACK，而不是 NAK 或丢弃");
+    assert_eq!(
+        msg_type(&r.msg),
+        MessageType::Ack,
+        "不能 NAK 一个有效的租约"
+    );
+    assert_eq!(r.msg.yiaddr(), held);
+    assert_eq!(r.scope_id, ScopeId(2), "必须选中被中继的那个作用域");
+}
+
+#[test]
+fn relayed_request_after_offer_is_acked() {
+    // 完整走一遍：中继来的 DISCOVER → OFFER → REQUEST → ACK
+    let (c, mut t) = (cfg_with_relay(), MemoryStore::new());
+    let offer = handle(
+        &c,
+        &mut t,
+        &via_relay(req(MessageType::Discover, 1)),
+        ctx(100),
+    );
+    let offered = offer.reply().unwrap().msg.yiaddr();
+
+    let mut m = via_relay(req(MessageType::Request, 1));
+    m.opts_mut().insert(DhcpOption::RequestedIpAddress(offered));
+    m.opts_mut().insert(DhcpOption::ServerIdentifier(SERVER));
+    let out = handle(&c, &mut t, &m, ctx(101));
+
+    let r = out.reply().expect("应当回 ACK");
+    assert_eq!(msg_type(&r.msg), MessageType::Ack);
+    assert_eq!(r.msg.yiaddr(), offered);
+    assert_eq!(r.dest, ReplyDest::Relay(RELAY));
+}
