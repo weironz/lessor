@@ -1,1 +1,1 @@
-{"updater":{"identifier":"updater","description":"只给界面开检查/安装更新和重启这几件事，别的一概不给。","remote":{"urls":["http://127.0.0.1:*","http://localhost:*"]},"local":true,"windows":["main"],"permissions":["core:default","updater:default","process:allow-restart","core:event:default"]}}
+{"updater":{"identifier":"updater","description":"只给界面开检查/安装更新和重启这几件事，别的一概不给。","remote":{"urls":["http://127.0.0.1:*","http://localhost:*"]},"local":true,"windows":["main"],"permissions":["core:default","updater:default","process:allow-restart","core:event:default","allow-stop-local-server"]}}

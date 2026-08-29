@@ -1,0 +1,13 @@
+# 应用自己的命令也要显式放行。
+#
+# 插件的权限（updater、process）在 capabilities 里写一句就有了，但
+# `invoke_handler` 注册的自有命令不在任何插件下 —— 得先在这里定义一个权限，
+# 再到 capabilities 里引用。
+#
+# 漏了这一步的症状很误导：`stop_local_server not allowed. Plugin not found`
+# —— 听着像命令没注册，其实是注册了但被 ACL 拦了。实测踩过。
+
+[[permission]]
+identifier = "allow-stop-local-server"
+description = "允许界面停掉桌面壳自己拉起的那个 lessord。装更新前必须先停 —— Windows 上文件被占用就覆盖不了。只影响本壳拉起的进程，外部实例不受影响。"
+commands.allow = ["stop_local_server"]

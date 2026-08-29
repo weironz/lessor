@@ -16,6 +16,7 @@
     "core:default",
     "updater:default",
     "process:allow-restart",
-    "core:event:default"
+    "core:event:default",
+    "allow-stop-local-server"
   ]
 }

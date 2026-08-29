@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "lessor-desktop"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "serde_json",
  "tauri",

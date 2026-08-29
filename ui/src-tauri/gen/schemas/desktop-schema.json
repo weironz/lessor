@@ -177,6 +177,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "允许界面停掉桌面壳自己拉起的那个 lessord。装更新前必须先停 —— Windows 上文件被占用就覆盖不了。只影响本壳拉起的进程，外部实例不受影响。",
+          "type": "string",
+          "const": "allow-stop-local-server",
+          "markdownDescription": "允许界面停掉桌面壳自己拉起的那个 lessord。装更新前必须先停 —— Windows 上文件被占用就覆盖不了。只影响本壳拉起的进程，外部实例不受影响。"
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",
