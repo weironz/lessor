@@ -27,3 +27,15 @@ __pycache__/
 
 # Tauri sidecar（CI 构建时拷入）
 /ui/src-tauri/binaries/
+
+# 签名私钥。绝不能进仓库 —— 泄露了等于把"能给所有客户推更新"的能力交出去。
+#
+# 这几条是兜底，不是正道：密钥本该放在仓库外（比如真正的 ~/.tauri/）。
+# 之所以要兜底，是因为 `tauri signer generate -w ~/...` 在 Git Bash 里
+# 那个 ~ 不会展开，会在当前目录下建一个名字就叫 "~" 的文件夹 ——
+# 实际踩过，密钥落在了 ui/~/.tauri/ 里，而且 git status 里明晃晃是未跟踪状态。
+*.key
+*.key.pub
+**/.tauri/
+# 上面那个展开失败留下的目录
+/ui/~/
