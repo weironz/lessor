@@ -198,8 +198,35 @@ fn spawn_local(state: &LocalServer) -> Result<String, String> {
     Ok(url)
 }
 
+/// 装更新之前，把我们拉起的那个 lessord 停掉。
+///
+/// **Windows 上文件被占用就装不上去** —— 安装程序要覆盖
+/// `lessord.exe`，而它此刻正在跑。不先停，安装要么失败，要么留下一个
+/// 新旧混合的安装（新的外壳配旧的服务），后者更难查。
+///
+/// 只停我们自己拉起的那个。attach 上去的外部实例（系统服务、或者别人手工
+/// 起的）不归这里管 —— 那是别人的进程，静悄悄杀掉别人的 DHCP 服务器，
+/// 后果比更新失败严重得多。这种情况返回一句话让界面照实说。
+#[tauri::command]
+fn stop_local_server(state: tauri::State<'_, LocalServer>) -> Result<bool, String> {
+    let Ok(mut guard) = state.0.lock() else {
+        return Err("内部状态异常，没能停掉本机服务".into());
+    };
+    let Some(child) = guard.as_mut() else {
+        // 我们没拉起过 —— 界面上连的是外部实例
+        return Ok(false);
+    };
+    child.kill().map_err(|e| format!("停不掉本机服务：{e}"))?;
+    let _ = child.wait();
+    *guard = None;
+    Ok(true)
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .invoke_handler(tauri::generate_handler![stop_local_server])
         .manage(LocalServer(Mutex::new(None)))
         .setup(|app| {
             let configured = std::env::var("LESSOR_URL").ok();

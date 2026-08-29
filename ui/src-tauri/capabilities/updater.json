@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "updater",
+  "description": "只给界面开检查/安装更新和重启这几件事，别的一概不给。",
+  "windows": ["main"],
+  "remote": {
+    "//": [
+      "界面不是打包进来的静态页，是 lessord 用 HTTP 端口提供的 ——",
+      "webview 加载的是外部 URL，Tauri 2 默认不给外部源任何 IPC 权限。",
+      "端口是启动时挑的（见 pick_http_port），所以只能按通配匹配。",
+      "只放本机回环：lessord 的管理接口本来就只听 127.0.0.1。"
+    ],
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "process:allow-restart",
+    "core:event:default"
+  ]
+}

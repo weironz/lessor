@@ -8,6 +8,18 @@
     "windows": [],
     "security": {
       "csp": null
+    },
+    "withGlobalTauri": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/weironz/lessor/releases/latest/download/latest.json"
+      ],
+      "pubkey": "PUBKEY_PLACEHOLDER",
+      "windows": {
+        "installMode": "passive"
+      }
     }
   },
   "bundle": {
@@ -30,6 +42,7 @@
     "longDescription": "lessor 的桌面界面。服务进程 lessord 单独运行，本程序只是它的客户端。",
     "externalBin": [
       "binaries/lessord"
-    ]
+    ],
+    "createUpdaterArtifacts": true
   }
 }

@@ -16,6 +16,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# 自动更新。签名校验是它自带的 —— 更新包必须由我们的私钥签过才会被装，
+# 否则谁能替换掉发布物谁就能在客户机器上执行代码。
+tauri-plugin-updater = "2"
+# 装完重启自己
+tauri-plugin-process = "2"
+# generate_context! 要把 capabilities 里的 JSON 内嵌进来，需要它在作用域里
+serde_json = "1"
 
 
 # 只为把子进程绑进 Job Object：外壳被强杀（任务管理器 / 崩溃）时，

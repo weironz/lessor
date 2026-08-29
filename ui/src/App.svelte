@@ -6,8 +6,10 @@
   import Events from './lib/Events.svelte'
   import Discover from './lib/Discover.svelte'
   import NewScope from './lib/NewScope.svelte'
+  import About from './lib/About.svelte'
 
   let tab = $state('scopes')
+  let showAbout = $state(false)
   let status = $state('connecting')
   let state = $state(null)
   let leases = $state([])
@@ -67,7 +69,12 @@
 <header>
   <div class="brand">
     <h1>lessor</h1>
-    {#if state}<span class="ver mono">v{state.version}</span>{/if}
+    <!-- 版本号本身就是"关于"的入口：想看版本的人和想查更新的人是同一批 -->
+    {#if state}
+      <button class="ver mono" onclick={() => (showAbout = true)} title="关于 / 检查更新">
+        v{state.version}
+      </button>
+    {/if}
   </div>
 
   <div class="meta">
@@ -77,6 +84,10 @@
     <span class="pill {status === 'online' ? 'ok' : 'danger'}">{statusLabel}</span>
   </div>
 </header>
+
+{#if showAbout}
+  <About version={state?.version ?? ''} onclose={() => (showAbout = false)} />
+{/if}
 
 {#if error}
   <p class="err">接口出错：{error}</p>
@@ -143,6 +154,16 @@
   .ver {
     font-size: 12px;
     color: var(--muted);
+    /* 长得像文字，行为是按钮 */
+    padding: 2px 6px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .ver:hover {
+    color: var(--ink);
+    border-color: var(--line);
   }
   .meta {
     display: flex;
