@@ -126,5 +126,5 @@ LESSOR_SERVER=192.168.233.1 python scripts/load_test.py 500
 `udhcpc` 的回归，跑真实客户端 + Linux 的 `SO_BINDTODEVICE` 隔离路径：
 
 ```bash
-cd docker && docker compose up --abort-on-container-exit --build
+just e2e
 ```

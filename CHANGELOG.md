@@ -8,7 +8,27 @@
 
 ## [Unreleased]
 
-尚无变化。
+### Added
+
+- `justfile`：本地开发编排。`just dev` 构建整套（前端 → lessord → sidecar →
+  桌面壳，顺序是硬性的），`just app` 拉起桌面端（已在跑的先杀掉），
+  另有 `serve` / `check` / `linux` / `deny` / `e2e` / `service` / `load`。
+  每条 recipe 的注释里写了为什么那么做 —— 多数是踩过的坑
+- **生产部署 compose**（[docker/compose.prod.yml](docker/compose.prod.yml)）
+  和配套的 `.env.example`。之前只在 release 说明里写了句"要 --network host"，
+  没有可以直接用的编排
+
+### Changed
+
+- 开发/验证用的容器统一收进 [docker/compose.dev.yml](docker/compose.dev.yml)
+  （按 profile 分组），不再散落在 `docker run` 命令里
+
+### Fixed
+
+- **`--config` 指向不存在的文件时直接启动失败**，导致容器部署没法自举 ——
+  数据卷第一次挂上来是空的，`docker compose up` 必然第一次就失败，人得先
+  手工造一个 JSON。现在文件不存在就按空配置起（零作用域不应答任何请求，
+  安全），界面上建好之后写进去。**目录**不存在仍然报错，那多半是路径写错了
 
 ## [0.0.5] - 2026-08-29
 

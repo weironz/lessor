@@ -197,6 +197,36 @@ impl Cli {
         };
 
         let cfg = match &self.config {
+            // 文件不存在就按空配置起，然后把界面上的改动写进去。
+            //
+            // 这是容器部署的必经之路：数据卷第一次挂上来是空的，要求文件
+            // 必须先存在的话，`docker compose up` 第一次必然失败，而人得先
+            // 手工造一个 JSON 才能开始 —— 那正是"服务先跑起来、配置在界面上做"
+            // 想避免的事（和 --serve-empty 是同一个取向）。
+            //
+            // 目录不存在仍然报错：那多半是路径写错了，静默建出来只会让人
+            // 对着一个永远空的配置发愣。
+            Some(path) if !path.exists() => {
+                if let Some(dir) = path.parent()
+                    && !dir.as_os_str().is_empty()
+                    && !dir.exists()
+                {
+                    bail!("配置文件的目录不存在：{} —— 路径写对了吗？", dir.display());
+                }
+                info!(path = %path.display(), "配置文件还不存在，按空配置启动 —— 界面上建好作用域后会写到这里");
+                Config::from_quick(config::Quick {
+                    server_ip: None,
+                    prefix: self.prefix,
+                    pool: None,
+                    router: None,
+                    dns: Vec::new(),
+                    lease_secs: self.lease_secs,
+                    iface: None,
+                    reservations: Vec::new(),
+                    boot: None,
+                    extra_options: Vec::new(),
+                })?
+            }
             Some(path) => Config::load(path)?,
             None => {
                 // --serve-empty 时监听器也可以先不建：网卡在界面上选

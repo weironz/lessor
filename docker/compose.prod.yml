@@ -1,0 +1,73 @@
+# 生产部署。开发/验证用的容器在 compose.dev.yml。
+#
+#   cp .env.example .env   # 改里面的 LESSOR_TOKEN
+#   docker compose -f compose.prod.yml up -d
+#
+# 起来之后打开 http://<这台机器>:8080，选网卡、建作用域。**零作用域时
+# 不应答任何 DHCP 请求**，所以在你配好之前它不会往网络上发地址。
+
+name: lessor
+
+services:
+  lessord:
+    image: ${LESSOR_IMAGE:-willdockerhub/lessord:latest}
+    restart: unless-stopped
+
+    # **必须是 host 网络。** DHCP 靠广播工作，广播过不了 NAT ——
+    # 用桥接网络加 `ports: ["67:67/udp"]` 是收不到客户端的
+    # DISCOVER 的（那是发往 255.255.255.255 的），而且应答的源地址也会错。
+    # 这一条没有变通办法，是协议决定的。
+    network_mode: host
+
+    # 只留绑 67 端口这一个能力，其余全丢掉。
+    #
+    # 注意这里没有 `user:`：实测过 docker 的 `--cap-add` 配上非 root 身份
+    # **不生效** —— --cap-add 只把能力放进 bounding set，非 root 进程的
+    # effective set 里拿不到（逐组合的实证见 setcaptest.sh）。容器里要降权
+    # 得给二进制设文件 capability，镜像目前没做。
+    # 所以这里的做法是：以 root 跑，但把能力削到只剩一个。
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+
+    # 除了数据卷，整个文件系统只读
+    read_only: true
+    tmpfs:
+      - /tmp
+
+    volumes:
+      # 配置和租约都在这儿。**配置文件第一次不存在是正常的** ——
+      # lessord 会按空配置起来，界面上建好作用域之后写进去。
+      - lessord-data:/var/lib/lessord
+
+    environment:
+      # 管理接口不再只听 127.0.0.1，所以令牌是必须的 —— 没有它，
+      # 同网段任何人都能改你的作用域。.env 里设。
+      LESSOR_TOKEN: ${LESSOR_TOKEN:?请在 .env 里设一个 LESSOR_TOKEN，管理接口要用}
+      LESSOR_LOG: ${LESSOR_LOG:-info}
+
+    command:
+      - --config=/var/lib/lessord/lessor.json
+      - --lease-db=/var/lib/lessord/leases.db
+      # host 网络下这是这台机器的 8080。要限制来源就用防火墙，
+      # 或者改成只听某个管理网段的地址。
+      - --http=0.0.0.0:8080
+
+    healthcheck:
+      # 用 /healthz 而不是 --version：后者只证明二进制能跑，
+      # 证明不了 HTTP 接口还活着。容器里没有 curl，用 lessord 自己探。
+      test: ["CMD", "/usr/local/bin/lessord", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  lessord-data:

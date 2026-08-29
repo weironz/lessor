@@ -1,0 +1,157 @@
+# 开发与验证用的容器。生产部署看 compose.prod.yml。
+#
+# 都走 profile，所以直接 `docker compose -f compose.dev.yml up` 不会莫名其妙
+# 启动一堆东西 —— 每个 profile 是一件独立的事，用 `just` 里对应的命令跑：
+#
+#   just linux     Linux 侧的 fmt / clippy / 测试（cfg(linux) 的代码本机编译不到）
+#   just deny      依赖树策略检查
+#   just e2e       真实客户端（busybox udhcpc）回归
+#   just service   --install-service 的成功路径（真 systemd）
+#
+# 编译缓存放命名卷里，不是 bind mount：Windows 上跨文件系统的 bind mount
+# 做增量编译慢一个数量级，而缓存本来也不需要在宿主机上看得见。
+
+name: lessor-dev
+
+# Linux 侧的检查共用同一套挂载
+x-rust: &rust
+  image: rust:latest
+  working_dir: /src
+  volumes:
+    - ../:/src:ro
+    - cargo-registry:/usr/local/cargo/registry
+    - linux-target:/target
+  environment:
+    CARGO_TARGET_DIR: /target
+
+services:
+  # 本机 clippy 全绿不代表 CI 会绿：收发层和服务注册层有相当一部分代码在
+  # #[cfg(target_os = "linux")] 里，Windows 上根本编译不到。这个坑吃过两次
+  # （service.rs 的 needless_return、systemd unit 模板里的 ASCII 双引号）。
+  linux:
+    <<: *rust
+    profiles: [check]
+    command:
+      - sh
+      - -c
+      - |
+        rustup component add clippy rustfmt >/dev/null 2>&1
+        cargo fmt --all --check && echo "fmt 通过"
+        cargo clippy --workspace --all-targets -- -D warnings && echo "clippy 通过"
+        cargo test --workspace 2>&1 | grep -E "^test result|FAILED"
+
+  # 已知漏洞 / 许可证 / 依赖来源。策略和每条的理由在 deny.toml。
+  # cargo-deny 装进命名卷，装一次后续直接用。
+  deny:
+    <<: *rust
+    profiles: [check]
+    volumes:
+      - ../:/src:ro
+      - cargo-registry:/usr/local/cargo/registry
+      - linux-target:/target
+      - tools:/out
+    command:
+      - sh
+      - -c
+      - |
+        test -x /out/bin/cargo-deny || cargo install --quiet --root /out --locked cargo-deny
+        /out/bin/cargo-deny --all-features check
+
+  # ---- 真实客户端回归 ----
+  #
+  # 自己拼的报文覆盖不到真实客户端的怪癖（option 61 写成 01+MAC 之类）。
+  # 这一组跑 busybox udhcpc 走完整握手，同时验 Linux 的 SO_BINDTODEVICE 隔离。
+  #
+  # lessord 用的是宿主机交叉编译好的二进制（见 Dockerfile 头部说明），
+  # 所以跑之前要先 cargo zigbuild —— just e2e 里做了。
+  lessord:
+    profiles: [regression]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    cap_add: [NET_ADMIN]
+    networks:
+      lab:
+        ipv4_address: 172.28.5.2
+    environment:
+      LESSOR_LOG: info
+    command:
+      - --listen=172.28.5.2
+      # Linux 上必须给网卡名，SO_BINDTODEVICE 才能生效
+      - --iface=eth0
+      - --prefix=24
+      - --pool=172.28.5.100-172.28.5.110
+      - --router=172.28.5.1
+      - --dns=1.1.1.1
+      - --lease-secs=600
+      - --reservation=02:42:ac:1c:05:63=172.28.5.99=fixed-client
+      - --http=0.0.0.0:8080
+    ports: ["8099:8080"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/lessord", "--version"]
+      interval: 2s
+      retries: 5
+
+  client:
+    profiles: [regression]
+    image: busybox:1.37
+    depends_on: [lessord]
+    cap_add: [NET_ADMIN]
+    networks:
+      lab:
+        # 这个 MAC 对应上面的静态保留，应当拿到 172.28.5.99
+        ipv4_address: 172.28.5.99
+    mac_address: "02:42:ac:1c:05:63"
+    command:
+      - sh
+      - -c
+      - |
+        echo "等待 lessord 就绪..."
+        sleep 3
+        cat > /tmp/hook <<'HOOK'
+        #!/bin/sh
+        [ "$$1" = "bound" ] && {
+          echo "=========================================="
+          echo "  udhcpc 拿到地址"
+          echo "  IP      : $$ip/$$subnet"
+          echo "  网关    : $$router"
+          echo "  DNS     : $$dns"
+          # $$ 是必须的：单个 $ 会被 compose 自己当变量替换掉，
+          # 于是这里印出来的是空字符串，租期这项等于没验
+          echo "  租期    : $${lease}s"
+          echo "  服务器  : $$serverid"
+          echo "=========================================="
+        }
+        exit 0
+        HOOK
+        chmod +x /tmp/hook
+        udhcpc -i eth0 -s /tmp/hook -n -q -t 8 -T 2 -f -x hostname:fixed-client
+        echo "客户端结束，退出码 $$?"
+
+  # ---- 注册系统服务的成功路径 ----
+  #
+  # M6 当时只验了"权限不足时报错正确"，装上去、开机自启、崩溃拉起、干净卸载
+  # 这一串全是纸面上的 —— 而常驻是产品的核心定位。需要真 systemd 作 PID 1，
+  # 代价是 privileged。这只是测试台，不是发布形态。
+  systemd:
+    profiles: [service]
+    build:
+      context: .
+      dockerfile: Dockerfile.systemd
+    privileged: true
+    cgroup: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+networks:
+  lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.5.0/24
+          gateway: 172.28.5.1
+
+volumes:
+  cargo-registry:
+  linux-target:
+  tools:

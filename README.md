@@ -129,10 +129,12 @@ GET    /api/events             WebSocket，实时推送每个报文的处理结�
 ### 验证
 
 ```bash
-# 真实 DHCP 客户端（busybox udhcpc），跑在 docker 里
-cargo zigbuild -p lessord --release --target x86_64-unknown-linux-gnu
-cp target/x86_64-unknown-linux-gnu/release/lessord docker/
-docker compose -f docker/compose.yml up --abort-on-container-exit --build
+# 本机全套：fmt + clippy + 测试
+just check
+# Linux 侧（cfg(linux) 的代码在 Windows 上编译不到，CI 是双平台矩阵）
+just linux
+# 真实 DHCP 客户端（busybox udhcpc）走完整握手
+just e2e
 ```
 
 `scripts/` 下另有两个手工脚本：`fake_client.py` 走一遍完整握手，
@@ -241,11 +243,37 @@ ui/src-tauri/    桌面外壳。纯客户端，零特权 —— 加载的就是 
 
 **配置面向 API 而非文件。** 界面上加一个地址池或保留，立即生效，不需要写配置文件重启进程。
 
-## 开发
+## 部署
+
+生产用 compose，编排和每一项的理由在
+[docker/compose.prod.yml](docker/compose.prod.yml) 里：
 
 ```bash
-cargo test        # 129 个测试
-cargo clippy --all-targets
+cd docker && cp .env.example .env   # 改里面的 LESSOR_TOKEN
+docker compose -f compose.prod.yml up -d
+```
+
+两件必须知道的事：
+
+- **网络必须是 `host`。** DHCP 靠广播，广播过不了 NAT —— 桥接网络加
+  `ports: ["67:67/udp"]` 是收不到客户端 DISCOVER 的。协议决定的，没有变通。
+- **管理接口要设令牌。** 容器里它听 `0.0.0.0:8080`，不再是只听本机；
+  没有令牌同网段谁都能改你的作用域。
+
+起来之后打开 `http://<这台机器>:8080` 选网卡建作用域。**零作用域时不应答
+任何 DHCP 请求**，所以在你配好之前它不会往网络上发地址。
+
+## 开发
+
+用 [just](https://github.com/casey/just)，`just --list` 看全部。
+每条 recipe 的注释里写了为什么那么做（多数是踩过的坑）。
+
+```bash
+just dev      # 构建本地栈：前端 → lessord → sidecar → 桌面壳
+just app      # 拉起桌面端（已经在跑的先杀掉）
+just serve    # 只起服务，用浏览器看界面
+just check    # fmt + clippy + 测试
+just linux    # Linux 侧同样一套（本机编译不到 cfg(linux) 的代码）
 ```
 
 ## 许可
