@@ -8,6 +8,15 @@
 
 ## [Unreleased]
 
+尚无变化。
+
+## [0.0.5] - 2026-08-29
+
+桌面端从这一版起可以自动更新。
+
+**注意：0.0.4 及更早的桌面端里没有更新功能**，升不到这一版 —— 需要手工装一次。
+从 0.0.5 往后才能在"关于"里点更新。
+
 ### Added
 
 - **桌面端"关于"与自动更新**：点右上角版本号打开，里面能检查更新、
@@ -218,7 +227,8 @@ lessord --install-service --config /var/lib/lessord/lessor.json ...
   （`registry.cn-shenzhen.aliyuncs.com/willspace/lessord`）镜像；
   NSIS 桌面安装程序；Linux / Windows 命令行压缩包
 
-[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.4...HEAD
+[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.5...HEAD
+[0.0.5]: https://github.com/weironz/lessor/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/weironz/lessor/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/weironz/lessor/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/weironz/lessor/compare/v0.0.1...v0.0.2

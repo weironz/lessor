@@ -302,12 +302,17 @@ jobs:
             容器里发 DHCP 要 `--network host`（广播过不了 NAT）；管理接口记得
             `--http 0.0.0.0:8080` 才能从容器外访问。
 
-            ## 本次版本验证到哪一步
+            ## 本次变化
 
-            129 个测试；五种真实客户端：busybox udhcpc、systemd-networkd、
-            VMware UEFI 固件（PXE 与 HTTP Boot 两种模式）、iPXE 2.0.0+ ——
-            PXE 一路验到 GRUB 提示符。细节见仓库 docs/。
+            见 [CHANGELOG](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md)。
+            验收证据（每个里程碑是怎么证明做完的）在
+            [ROADMAP-done](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/ROADMAP-done.md)。
 
             ## 已知边界
 
-            早期版本：租约仅内存存储（重启即失）、只支持 IPv4、macOS 上无法做收包隔离。
+            - **未在真机 BMC 上验证过** —— 现有客户端矩阵是 VMware 固件、
+              busybox udhcpc、systemd-networkd、iPXE。这是 `v0.1` 的门槛，
+              见 [ROADMAP](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/ROADMAP.md) 的 M9。
+            - 只支持 IPv4；macOS 上无法做收包隔离。
+            - 安装程序没有代码签名，Windows 会弹 SmartScreen ——
+              点"更多信息 → 仍要运行"。被 EDR 直接拦死时改用下面的命令行压缩包。
