@@ -188,12 +188,24 @@ jobs:
           test -n "$(ls dist/*.tar.gz)"    || { echo "::error::缺 Linux 压缩包"; exit 1; }
           test -n "$(ls dist/*.zip)"       || { echo "::error::缺 Windows 压缩包"; exit 1; }
 
-      # 客户的安全扫描要一份物料清单。给源码目录生成 ——
-      # 这样 Rust 依赖（Cargo.lock）和前端依赖（bun.lock）都在一份里，
-      # 只扫二进制的话前端那半就漏了。
+      # 客户的安全扫描要一份物料清单。对源码目录生成 —— 只扫二进制的话
+      # 前端那半就漏了。
       - uses: actions/checkout@v4
         with:
           path: src
+
+      # syft 不认 bun.lock（实测：只扒到 Cargo.lock 里的 642 个 crate，
+      # npm 包一个都没有）。bun 能顺手导出一份 yarn.lock，syft 认这个 ——
+      # 加上之后 102 个前端包才进得来。
+      # 一份自称完整、实际只有一半的 SBOM 比没有更糟：客户拿它扫，
+      # 扫不出前端的漏洞还以为是干净的。
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: ui/package.json
+      - name: 给 SBOM 备一份 syft 认得的前端清单
+        working-directory: src/ui
+        run: bun install --frozen-lockfile --yarn
+
       - name: 生成 SBOM
         uses: anchore/sbom-action@v0
         with:
@@ -201,6 +213,14 @@ jobs:
           format: spdx-json
           artifact-name: lessor-${{ github.ref_name }}.spdx.json
           output-file: dist/lessor-${{ github.ref_name }}.spdx.json
+
+      - name: 校验 SBOM 两侧依赖都在
+        run: |
+          f="dist/lessor-${{ github.ref_name }}.spdx.json"
+          test -s "$f" || { echo "::error::SBOM 没生成"; exit 1; }
+          grep -q '"name": *"tokio"' "$f" || { echo "::error::SBOM 里没有 Rust 依赖"; exit 1; }
+          grep -q '"name": *"svelte"' "$f" || { echo "::error::SBOM 里没有前端依赖"; exit 1; }
+          echo "SBOM 包数：$(grep -c '"SPDXID": *"SPDXRef-Package' "$f")"
 
       - uses: softprops/action-gh-release@v2
         with:

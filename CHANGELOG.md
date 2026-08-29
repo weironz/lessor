@@ -8,6 +8,30 @@
 
 ## [Unreleased]
 
+尚无变化。
+
+## [0.0.4] - 2026-08-29
+
+这一版把服务从"能放着不管"推到"敢放进企业网里"：跨网段（DHCP 中继）、
+服务降权不再以 root 运行、依赖漏洞进 CI 闸门。
+
+仍是 0.0.x —— `v0.1` 的门槛是真机 BMC 验证（ROADMAP 的 M9），还没过。
+现有客户端矩阵是 VMware 固件 + Linux 客户端 + 真 iPXE，一台真 BMC 都没有。
+
+### 升级注意（只影响用 `--install-service` 的 Linux 部署）
+
+**systemd 服务现在以 `lessord` 用户运行，不再是 root。** 相应地，
+`--config` / `--lease-db` / `--capture` 必须放在 `/var/lib/lessord/` 下 ——
+配置写回是"同目录建临时文件再改名"，需要父目录的写权限，服务只在那个目录里
+有。重新注册时如果路径不在那儿，**会在注册前就拒绝**并告诉你怎么放：
+
+```bash
+sudo mkdir -p /var/lib/lessord && sudo cp <你的配置> /var/lib/lessord/
+lessord --install-service --config /var/lib/lessord/lessor.json ...
+```
+
+已经装好的服务不受影响（unit 文件只在重新注册时才重写）。
+
 ### Added
 
 - 实时报文日志带上客户端自报的 option 60（设备类型）—— 现场一屏 MAC
@@ -177,7 +201,8 @@
   （`registry.cn-shenzhen.aliyuncs.com/willspace/lessord`）镜像；
   NSIS 桌面安装程序；Linux / Windows 命令行压缩包
 
-[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.3...HEAD
+[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.4...HEAD
+[0.0.4]: https://github.com/weironz/lessor/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/weironz/lessor/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/weironz/lessor/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/weironz/lessor/releases/tag/v0.0.1
