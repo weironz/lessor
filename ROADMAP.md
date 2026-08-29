@@ -65,11 +65,6 @@ DHCP 靠广播工作，过不去三层 —— Tailscale / VPN 连过去是发不
 - DHCPv6
 - DDNS 联动（完整 DNS 服务器仍是非目标）
 
-## 小项 backlog（不立里程碑）
-
-- WebSocket 事件带 `vendor_class`（实时日志里认出设备类型）
-- 租约行放 `http://<租约IP>` 链接（BMC 尾环的附带能力形态）
-
 ## 已否决
 
 - **代码签名证书**（2026-08-28 决定不买）。后果要认下来：Windows 上

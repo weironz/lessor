@@ -182,7 +182,10 @@ const BOOTP_FILE_LEN: usize = 128;
 
 /// option 60。PXE 客户端会填 `PXEClient:Arch:00007:...`，
 /// 据此可以区分固件阶段和操作系统阶段，也便于在界面上认出设备类型。
-fn vendor_class(msg: &Message) -> Option<String> {
+///
+/// 公开出去是给实时日志用的：现场一屏 MAC 地址谁也认不出哪台是哪台，
+/// 而 option 60 常常直接写着厂商和阶段（`PXEClient:Arch:00007:...`）。
+pub fn vendor_class(msg: &Message) -> Option<String> {
     match msg.opts().get(OptionCode::ClassIdentifier) {
         Some(DhcpOption::ClassIdentifier(raw)) if !raw.is_empty() => {
             Some(String::from_utf8_lossy(raw).into_owned())

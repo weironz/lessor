@@ -49,7 +49,16 @@
       <tbody>
         {#each leases as l (`${l.scopeId}/${l.ip}`)}
           <tr>
-            <td class="mono">{l.ip}</td>
+            <!--
+              地址本身就是入口。上架时拿到地址的下一步几乎总是"点进去看看"，
+              而 BMC 的 Web 界面走 https —— 和设备发现那边保持一致。
+              不是每个客户端都有 Web 界面，点开打不开也没什么损失。
+            -->
+            <td class="mono">
+              <a href={`https://${l.ip}/`} target="_blank" rel="noreferrer" title="在浏览器里打开 https://{l.ip}/">
+                {l.ip}
+              </a>
+            </td>
             <td class="mono">{l.client.value}</td>
             <td>{l.hostname ?? '—'}</td>
             <td><span class="pill {STATE_STYLE[l.state] ?? ''}">{l.state}</span></td>

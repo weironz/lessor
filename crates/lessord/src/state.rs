@@ -38,6 +38,11 @@ pub struct PacketEvent {
     /// 丢弃原因，或地址是怎么选出来的
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// 客户端自报的 option 60。现场一屏 MAC 谁也认不出哪台是哪台，
+    /// 而这个字段常常直接写着厂商和阶段 —— 尤其是分不清"这台是固件在
+    /// 要地址还是系统装好了在要地址"的时候。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor_class: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -494,6 +499,7 @@ impl AppState {
 
         let request = request_label(req);
         let client = client_label(req);
+        let vendor_class = lessor_core::server::vendor_class(req);
 
         let ev = match &outcome {
             Outcome::Reply(r) => {
@@ -508,6 +514,7 @@ impl AppState {
                     // NAK 用拒绝原因，其余用地址是怎么选出来的
                     detail: reject_reason(&r.msg)
                         .or_else(|| r.alloc_source.map(|s| alloc_source_text(s).to_owned())),
+                    vendor_class,
                 }
             }
             Outcome::Handled(note) => PacketEvent {
@@ -518,6 +525,7 @@ impl AppState {
                 scope_id: None,
                 ip: None,
                 detail: Some((*note).to_owned()),
+                vendor_class,
             },
             Outcome::Drop(r) => PacketEvent {
                 at,
@@ -539,6 +547,8 @@ impl AppState {
                     }
                     _ => drop_reason_text(*r).to_owned(),
                 }),
+                // 没应答的时候最需要知道是什么设备 —— 那正是要排查的那一台
+                vendor_class,
             },
         };
 
