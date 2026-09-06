@@ -327,6 +327,9 @@ pub struct ScopeStatus {
     /// 本机在该网段上的地址。经中继服务的网段这里是 `None` ——
     /// 那不是配漏了，见下面的 `via_relay`。
     pub server_ip: Option<Ipv4Addr>,
+    /// 监听地址是否仍挂在本机上。网卡被换走、地址被改掉时，配置会保留，
+    /// 但这台机器已经无法在该地址上接收 DHCP 广播。
+    pub listener_present: bool,
     /// 这个网段是经 DHCP 中继服务的。界面据此把"没有本机地址"标成
     /// 有意为之，而不是显示成一个说不清的空值。
     pub via_relay: bool,
@@ -571,21 +574,30 @@ impl AppState {
         g.server
             .scopes
             .iter()
-            .map(|s| ScopeStatus {
-                id: s.id,
-                name: s.name.clone(),
-                enabled: s.enabled,
-                subnet: s.subnet,
-                prefix: s.prefix,
-                capacity: s.capacity(),
-                used: g.store.store.used_in(s.id, t),
-                reservations: s.reservations.len(),
-                server_ip: g
+            .map(|s| {
+                let server_ip = g
                     .listeners
                     .iter()
                     .find(|l| s.contains(l.server_ip))
-                    .map(|l| l.server_ip),
-                via_relay: s.via_relay,
+                    .map(|l| l.server_ip);
+                // 查询失败时不能武断地报"地址消失"：这台机器可能只是暂时
+                // 无法枚举网卡。只有明确找不到该地址才在界面上报警。
+                let listener_present = server_ip.is_some_and(|ip| {
+                    lessor_net::interface_with_address(ip).map_or(true, |found| found.is_some())
+                });
+                ScopeStatus {
+                    id: s.id,
+                    name: s.name.clone(),
+                    enabled: s.enabled,
+                    subnet: s.subnet,
+                    prefix: s.prefix,
+                    capacity: s.capacity(),
+                    used: g.store.store.used_in(s.id, t),
+                    reservations: s.reservations.len(),
+                    server_ip,
+                    listener_present,
+                    via_relay: s.via_relay,
+                }
             })
             .collect()
     }
@@ -675,44 +687,66 @@ impl AppState {
     }
 
     pub async fn listeners(&self) -> Vec<Listener> {
-        self.inner.read().await.listeners.clone()
+        let mut listeners = self.inner.read().await.listeners.clone();
+        // `iface` 是配置中的可选项，且只有 Linux 会把它传给
+        // SO_BINDTODEVICE。Windows 按本机 IP 绑定 UDP socket，因此旧配置
+        // 常常没有这个字段；对 API 补全实际归属网卡，避免界面误报“未绑定”。
+        for listener in &mut listeners {
+            if listener.iface.is_none() {
+                if let Ok(Some(iface)) = lessor_net::interface_with_address(listener.server_ip) {
+                    listener.iface = Some(iface.name);
+                }
+            }
+        }
+        listeners
     }
 
     /// 运行时新建作用域。
     ///
     /// 会先跑 `Scope::validate` 与跨对象检查（必须有落在该网段的监听器、
     /// 不能与已有作用域抢同一个监听器地址）—— 界面上填错不该把服务搞坏。
-    pub async fn add_scope(&self, mut scope: lessor_core::Scope) -> Result<ScopeId, Vec<String>> {
+    pub async fn add_scope(
+        &self,
+        mut scope: lessor_core::Scope,
+        server_ip: Ipv4Addr,
+    ) -> Result<ScopeId, Vec<String>> {
         let mut g = self.inner.write().await;
 
-        let mut problems: Vec<String> = scope.validate().iter().map(ToString::to_string).collect();
+        let mut problems = Vec::new();
+        if !scope.contains(server_ip) {
+            problems.push(format!(
+                "监听地址 {server_ip} 不在作用域 {}/{} 内",
+                scope.subnet, scope.prefix
+            ));
+        }
 
         // 该网段还没有监听器时自动补一个：本机在这个网段上的地址就是
         // 它的 server_ip。找不到才是真的错 —— 那说明这台机器根本不在
         // 用户填的网段里，建了作用域也收不到包。
         let mut listener_to_start = None;
-        if !g.listeners.iter().any(|l| scope.contains(l.server_ip)) {
-            match lessor_net::interfaces().ok().and_then(|ifs| {
-                ifs.into_iter()
-                    .filter(lessor_net::Interface::is_servable)
-                    .find_map(|i| {
-                        let cidr = i.primary_ipv4()?;
-                        scope.contains(cidr.addr).then_some((i.name, cidr.addr))
-                    })
-            }) {
-                Some((iface, server_ip)) => {
+        if !g.listeners.iter().any(|l| l.server_ip == server_ip) {
+            match lessor_net::interface_with_address(server_ip).ok().flatten() {
+                Some(iface) => {
                     listener_to_start = Some(Listener {
                         server_ip,
                         // 只有 Linux 用得上网卡名（SO_BINDTODEVICE）
-                        iface: cfg!(target_os = "linux").then_some(iface),
+                        iface: cfg!(target_os = "linux").then_some(iface.name),
                     });
                 }
                 None => problems.push(format!(
-                    "本机没有落在 {}/{} 里的地址 —— 建了作用域也收不到这个网段的请求",
-                    scope.subnet, scope.prefix
+                    "本机没有监听地址 {server_ip} —— 建了作用域也收不到这个网段的请求"
                 )),
             }
         }
+
+        // 服务端自己的地址永远不能被分给客户端。即使前端或导入配置把它
+        // 放进了地址池，也通过排除项兜底，避免 IP 冲突把监听地址踢下线。
+        if !scope.exclusions.iter().any(|r| r.contains(server_ip)) {
+            scope
+                .exclusions
+                .push(lessor_core::Range::new(server_ip, server_ip).expect("单地址范围总是有效"));
+        }
+        problems.extend(scope.validate().iter().map(ToString::to_string));
         if let Some(conflict) = g.server.scopes.iter().find(|s| {
             g.listeners
                 .iter()

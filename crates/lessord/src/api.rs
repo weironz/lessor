@@ -183,7 +183,7 @@ async fn post_scope(State(state): State<AppState>, Json(req): Json<NewScope>) ->
         scope.offer_secs = 30.min(secs);
     }
 
-    match state.add_scope(scope).await {
+    match state.add_scope(scope, req.server_ip).await {
         Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
         Err(problems) => (
             StatusCode::BAD_REQUEST,

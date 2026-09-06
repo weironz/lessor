@@ -79,6 +79,22 @@ impl Config {
             }
         }
 
+        // 监听地址是 DHCP server identifier，绝不能同时出现在可分配池中。
+        // 否则客户端拿到它后会触发 ARP 冲突，Windows 会把本机地址标成
+        // Duplicate，服务端随即失去正常通信能力。
+        for l in &self.listeners {
+            for s in self.scopes.iter().filter(|s| s.contains(l.server_ip)) {
+                let in_pool = s.pools.iter().any(|r| r.contains(l.server_ip));
+                let excluded = s.exclusions.iter().any(|r| r.contains(l.server_ip));
+                if in_pool && !excluded {
+                    problems.push(format!(
+                        "作用域 {} 的地址池包含监听地址 {} —— 请把它排除或改用其他地址池",
+                        s.name, l.server_ip
+                    ));
+                }
+            }
+        }
+
         // 两个作用域覆盖同一个监听器地址会导致选谁不确定
         for l in &self.listeners {
             let hits: Vec<&str> = self

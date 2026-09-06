@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { discover, getInterfaces } from './api.js'
+  import { discover, getInterfaces, getState } from './api.js'
 
   let ifaces = $state([])
   let picked = $state('')
@@ -11,19 +11,38 @@
 
   // 只列出能在上面做发现的网卡：非环回、有 IPv4 地址
   const usable = $derived(ifaces.filter((i) => !i.isLoopback && i.ipv4.length > 0))
-  const current = $derived(usable.find((i) => i.name === picked))
+  // 不能只取每张网卡的第一个 IPv4：Windows 会把 APIPA 排在手工地址前。
+  const addresses = $derived(
+    usable.flatMap((i) => i.ipv4.map((cidr) => ({
+      key: `${i.name}\u0000${cidr.addr}/${cidr.prefix}`,
+      name: i.name,
+      cidr,
+    }))),
+  )
+  const current = $derived(addresses.find((i) => i.key === picked))
 
   onMount(async () => {
     try {
-      ifaces = await getInterfaces()
-      picked = usable[0]?.name ?? ''
+      const [list, state] = await Promise.all([getInterfaces(), getState()])
+      ifaces = list
+      const available = list
+        .filter((i) => !i.isLoopback && i.ipv4.length > 0)
+        .flatMap((i) => i.ipv4.map((cidr) => ({
+          key: `${i.name}\u0000${cidr.addr}/${cidr.prefix}`,
+          cidr,
+        })))
+      // 发现页优先选 DHCP 正在监听的地址；没有作用域时才退回第一个地址。
+      const listenerIp = state.listeners?.find((l) =>
+        available.some((item) => item.cidr.addr === l.serverIp),
+      )?.serverIp
+      picked = available.find((item) => item.cidr.addr === listenerIp)?.key ?? available[0]?.key ?? ''
     } catch (e) {
       err = e.message
     }
   })
 
   async function run() {
-    const cidr = current?.ipv4[0]
+    const cidr = current?.cidr
     if (!cidr) return
     running = true
     err = null
@@ -48,8 +67,8 @@
   <label>
     网卡
     <select bind:value={picked} disabled={running || usable.length === 0}>
-      {#each usable as i (i.name)}
-        <option value={i.name}>{i.name} — {i.ipv4[0].addr}/{i.ipv4[0].prefix}</option>
+      {#each addresses as item (item.key)}
+        <option value={item.key}>{item.name} — {item.cidr.addr}/{item.cidr.prefix}</option>
       {/each}
     </select>
   </label>

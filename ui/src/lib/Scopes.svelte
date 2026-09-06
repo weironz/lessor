@@ -1,6 +1,7 @@
 <script>
   import { patchScope, deleteScope } from './api.js'
   import Reservations from './Reservations.svelte'
+  import NewScope from './NewScope.svelte'
 
   let { scopes = [], listeners = [], onchange } = $props()
 
@@ -8,6 +9,7 @@
   let err = $state(null)
   let confirming = $state(null)
   let managing = $state(null)
+  let adding = $state(false)
 
   const pct = (s) => (s.capacity === 0 ? 0 : Math.round((s.used / s.capacity) * 100))
 
@@ -30,6 +32,22 @@
 </script>
 
 {#if err}<p class="err">{err}</p>{/if}
+
+{#if adding}
+  <NewScope
+    compact
+    oncreated={() => {
+      adding = false
+      onchange?.()
+    }}
+    oncancel={() => (adding = false)}
+  />
+{:else}
+  <div class="toolbar">
+    <p>切换到其他网卡或网段时，先新增正确的作用域，再停用或删除旧作用域。</p>
+    <button class="link" onclick={() => (adding = true)}>新增 / 更换网卡</button>
+  </div>
+{/if}
 
 {#if scopes.length === 0}
   <div class="empty">没有配置作用域</div>
@@ -61,6 +79,12 @@
           <dt>静态保留</dt>
           <dd class="mono">{s.reservations}</dd>
         </dl>
+
+				{#if !s.viaRelay && s.listenerPresent === false}
+          <p class="stale">
+            监听地址已不在本机。请用“新增 / 更换网卡”选择当前网卡，再停用或删除此作用域。
+          </p>
+        {/if}
 
         <div class="usage">
           <div class="bar" role="img"
@@ -97,13 +121,13 @@
     <div class="tablewrap">
       <table>
         <thead>
-          <tr><th>本机地址</th><th>绑定网卡</th></tr>
+          <tr><th>本机地址</th><th>所在网卡</th></tr>
         </thead>
         <tbody>
           {#each listeners as l (l.serverIp)}
             <tr>
               <td class="mono">{l.serverIp}</td>
-              <td class="mono muted">{l.iface ?? '未绑定'}</td>
+              <td class="mono muted">{l.iface ?? '未找到'}</td>
             </tr>
           {/each}
         </tbody>
@@ -197,5 +221,24 @@
     margin: 24px 0 10px;
     font-size: 13px;
     color: var(--muted);
+  }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 14px;
+    font-size: 13px;
+  }
+  .toolbar p { margin: 0; color: var(--muted); }
+  .stale {
+    margin: -2px 0 12px;
+    padding: 8px 10px;
+    color: #8a5a00;
+    background: var(--warn-bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    font-size: 12.5px;
+    line-height: 1.45;
   }
 </style>
