@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use lessor_core::MacAddr;
 use lessor_net::Ipv4Cidr;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 use tracing::debug;
 
@@ -30,7 +30,7 @@ pub mod rmcp;
 pub use neighbor::Neighbor;
 
 /// 是怎么发现这台设备的。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Method {
     /// 回应了 IPMI 的 RMCP Presence Ping
@@ -41,7 +41,7 @@ pub enum Method {
     Neighbor,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
     pub ip: Ipv4Addr,

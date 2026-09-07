@@ -133,12 +133,16 @@ GET    /api/events             WebSocket，实时推送每个报文的处理结�
 POST /api/v1/scopes/{id}/discover       明确执行一次该作用域的发现
 GET  /api/v1/scopes/{id}/devices?kind=bmc
                                          读取最近一次缓存中的已确认 BMC
+GET  /api/v1/devices?kind=bmc&scopeId=1 聚合读取已扫描作用域；每条含 scope 归属
 ```
 
 `bmc` 只在 RMCP/IPMI Presence Ping 明确确认后返回，响应带
 `confidence: "confirmed"` 与关联的 DHCP `lease`（如果该地址正是 lessor
 下发的）。`GET` 不会触发扫描；没有执行过 `POST` 时返回 404，避免自动化
-在无意间扫错网段。
+在无意间扫错网段。缓存通过稳定的 `scopeId` 关联作用域，响应同时投影当前
+作用域名称、网段和监听地址；服务重启后仍会从配置文件旁的
+`*.discoveries.json` 恢复。后台每 5 分钟仅作 RMCP 广播和邻居表轻量刷新，
+不会定时逐 IP 扫描；完整扫描只由 `POST` 明确触发。
 
 随发行包提供的 `lessorctl` 是这套 API 的脚本化客户端。`wait` 会重复执行
 作用域发现，找到 BMC 后仅向标准输出写一条 JSON；超时退出码为 `3`，适合

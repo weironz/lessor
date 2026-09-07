@@ -8,6 +8,7 @@ mod capture;
 mod config;
 mod conflict;
 mod dhcp;
+mod discovery_refresh;
 mod health;
 mod service;
 mod sqlite;
@@ -427,10 +428,14 @@ async fn main() -> Result<()> {
     // 通过这个 channel 送回来 spawn。
     let (new_listener_tx, mut new_listener_rx) = tokio::sync::mpsc::unbounded_channel();
 
+    let discovery_path = config_path
+        .as_ref()
+        .map(|path| path.with_extension("discoveries.json"));
     let mut state = AppState::new(cfg.clone())
         .with_token(token)
         .with_listener_spawner(new_listener_tx)
-        .with_config_path(config_path);
+        .with_config_path(config_path)
+        .with_discovery_path(discovery_path);
 
     let capture = match &capture_path {
         Some(p) => {
@@ -483,6 +488,12 @@ async fn main() -> Result<()> {
     {
         let st = state.clone();
         tasks.spawn(async move { dhcp::reaper(st, reap_secs).await });
+    }
+
+    {
+        // 与 DHCP 数据路径隔离：定期刷新只是维护设备视图，绝不能影响发地址。
+        let st = state.clone();
+        tasks.spawn(async move { discovery_refresh::run(st).await });
     }
 
     if !no_probe {

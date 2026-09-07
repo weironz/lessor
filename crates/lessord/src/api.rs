@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/leases/{scope_id}/{ip}", delete(revoke_lease))
         .route("/api/interfaces", get(get_interfaces))
         .route("/api/discover", post(post_discover))
+        .route("/api/v1/devices", get(get_devices))
         .route("/api/v1/scopes/{id}/discover", post(post_scope_discover))
         .route("/api/v1/scopes/{id}/devices", get(get_scope_devices))
         .route("/api/scopes", post(post_scope))
@@ -463,8 +464,10 @@ struct ScopeDiscoverRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DevicesQuery {
     kind: Option<DeviceKind>,
+    scope_id: Option<ScopeId>,
 }
 
 #[derive(Serialize)]
@@ -478,6 +481,8 @@ struct DeviceRecord {
     sources: Vec<discovery::Method>,
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<String>,
+    first_seen: u64,
+    last_seen: u64,
     /// 如果设备地址是本服务在该作用域下发的，则把 DHCP 租约一并关联。
     #[serde(skip_serializing_if = "Option::is_none")]
     lease: Option<Lease>,
@@ -486,9 +491,22 @@ struct DeviceRecord {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScopeDevices {
-    scope_id: ScopeId,
+    scope: ScopeReference,
     scanned_at: u64,
     devices: Vec<DeviceRecord>,
+}
+
+/// 发现记录的稳定归属是 scopeId；其他字段从当前作用域实时投影，改名或
+/// 调整显示信息不会让缓存保留过期副本。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopeReference {
+    id: ScopeId,
+    name: String,
+    subnet: Ipv4Addr,
+    prefix: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_ip: Option<Ipv4Addr>,
 }
 
 #[derive(Serialize)]
@@ -501,42 +519,76 @@ async fn device_collection(
     scope_id: ScopeId,
     kind: Option<DeviceKind>,
 ) -> Option<ScopeDevices> {
+    let scope = state
+        .scope_status()
+        .await
+        .into_iter()
+        .find(|scope| scope.id == scope_id)?;
     let (discovery, leases) = state.discovered_devices(scope_id).await?;
     let current = now();
     let devices = discovery
         .devices
         .into_iter()
-        .map(|device| {
-            let device_kind = if device.is_bmc {
+        .map(|cached| {
+            let device_kind = if cached.device.is_bmc {
                 DeviceKind::Bmc
             } else {
                 DeviceKind::Device
             };
-            (device, device_kind)
+            (cached, device_kind)
         })
         .filter(|(_, device_kind)| kind.is_none_or(|wanted| wanted == *device_kind))
-        .map(|(device, device_kind)| DeviceRecord {
-            ip: device.ip,
-            mac: device.mac,
+        .map(|(cached, device_kind)| DeviceRecord {
+            ip: cached.device.ip,
+            mac: cached.device.mac,
             kind: device_kind,
-            confidence: if device.is_bmc {
+            confidence: if cached.device.is_bmc {
                 DeviceConfidence::Confirmed
             } else {
                 DeviceConfidence::Low
             },
-            sources: device.via,
-            note: device.note,
+            sources: cached.device.via,
+            note: cached.device.note,
+            first_seen: cached.first_seen,
+            last_seen: cached.last_seen,
             lease: leases
                 .iter()
-                .find(|lease| lease.ip == device.ip && lease.is_active(current))
+                .find(|lease| lease.ip == cached.device.ip && lease.is_active(current))
                 .cloned(),
         })
         .collect();
     Some(ScopeDevices {
-        scope_id,
+        scope: ScopeReference {
+            id: scope.id,
+            name: scope.name,
+            subnet: scope.subnet,
+            prefix: scope.prefix,
+            server_ip: scope.server_ip,
+        },
         scanned_at: discovery.scanned_at,
         devices,
     })
+}
+
+/// 聚合作用域设备缓存。GET 永远不发包；没有缓存的作用域不会出现在结果中，
+/// 调用方可结合 /api/state 区分“尚未扫描”和“扫描为空”。
+async fn get_devices(State(state): State<AppState>, Query(query): Query<DevicesQuery>) -> Response {
+    let scope_ids: Vec<ScopeId> = match query.scope_id {
+        Some(id) => vec![id],
+        None => state
+            .scope_status()
+            .await
+            .into_iter()
+            .map(|scope| scope.id)
+            .collect(),
+    };
+    let mut collections = Vec::new();
+    for scope_id in scope_ids {
+        if let Some(devices) = device_collection(&state, scope_id, query.kind).await {
+            collections.push(devices);
+        }
+    }
+    Json(Data { data: collections }).into_response()
 }
 
 async fn get_scope_devices(

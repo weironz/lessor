@@ -36,8 +36,15 @@
 
   async function beginDiscovery(target) {
     await refresh()
-    discoveryTarget = target
+    // scanId 是一次性的触发器。发现页消费它后，重新切换标签页只读缓存。
+    discoveryTarget = { ...target, scanId: `${Date.now()}-${Math.random()}` }
     tab = 'discover'
+  }
+
+  function markDiscoveryStarted() {
+    if (discoveryTarget?.scanId) {
+      discoveryTarget = { ...discoveryTarget, scanId: null }
+    }
   }
 
   onMount(() => {
@@ -140,7 +147,7 @@
   {:else if tab === 'events'}
     <Events {packets} onclear={() => (packets = [])} />
   {:else}
-    <Discover target={discoveryTarget} />
+    <Discover target={discoveryTarget} onautostart={markDiscoveryStarted} />
   {/if}
 </main>
 {/if}

@@ -59,6 +59,15 @@ export const getScopeDevices = (id, { kind } = {}) => {
   return json(`/api/v1/scopes/${id}/devices${query}`)
 }
 
+// 聚合读取所有已扫描作用域的缓存；这是纯 GET，不会触发任何网络探测。
+export const getDevices = ({ kind, scopeId } = {}) => {
+  const query = new URLSearchParams()
+  if (kind) query.set('kind', kind)
+  if (scopeId !== undefined && scopeId !== null) query.set('scopeId', scopeId)
+  const suffix = query.size ? `?${query}` : ''
+  return json(`/api/v1/devices${suffix}`)
+}
+
 /// 连事件流。断开后自动重连 —— 服务重启不该让界面变成死的。
 export function connectEvents({ onEvent, onStatus }) {
   let ws = null

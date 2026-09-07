@@ -9,7 +9,7 @@ use lessor_core::{
     AllocSource, DropReason, Lease, LeaseStore, MemoryStore, Outcome, ScopeId, ServerConfig,
     UnixTime,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
 
 use crate::config::{Config, Listener};
@@ -55,6 +55,8 @@ pub enum Event {
     LeasesChanged,
     /// 作用域发生变化，前端应重新拉取
     ScopesChanged,
+    /// 设备发现缓存发生变化；这不是 DHCP 事件，消费者只需刷新设备视图。
+    DevicesChanged,
     /// 定期清理回收了若干条过期租约
     Reaped { count: usize },
 }
@@ -253,12 +255,42 @@ struct Inner {
     discoveries: HashMap<ScopeId, CachedDiscovery>,
 }
 
+/// 多久没有再次看见的设备会从缓存中清掉。保留窗口让短暂丢包不会把刚
+/// 找到的 BMC 从列表中抹掉，同时 `last_seen` 能诚实地告诉调用方新鲜度。
+const DISCOVERY_RETENTION_SECS: UnixTime = 24 * 60 * 60;
+
 /// 最近一次面向某个作用域的设备发现。缓存和作用域绑定，避免 GET 请求
 /// 意外触发网络扫描；自动化可以明确 POST 一次发现，再稳定地读取结果。
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedDevice {
+    pub device: discovery::Device,
+    pub first_seen: UnixTime,
+    pub last_seen: UnixTime,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CachedDiscovery {
     pub scanned_at: UnixTime,
-    pub devices: Vec<discovery::Device>,
+    pub devices: Vec<CachedDevice>,
+}
+
+/// 发现缓存是运行状态而不是 DHCP 配置，单独存放，避免每次定期刷新都改动
+/// 人工维护的作用域文件。数组而不是 JSON map，因 ScopeId 在 JSON 中不应
+/// 被偷偷转换成字符串键。
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveryCacheFile {
+    discoveries: Vec<PersistedDiscovery>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedDiscovery {
+    scope_id: ScopeId,
+    scanned_at: UnixTime,
+    devices: Vec<CachedDevice>,
 }
 
 #[derive(Debug)]
@@ -320,6 +352,8 @@ pub struct AppState {
     /// 配置文件路径。给了的话，界面上的每次改动都会写回去 ——
     /// 常驻服务重启后配置还在，否则界面改的东西活不过一次重启。
     config_path: Option<Arc<std::path::Path>>,
+    /// 与配置文件相邻的发现状态文件。没有配置文件的临时运行不落盘。
+    discovery_path: Option<Arc<std::path::Path>>,
     pub counters: Arc<Counters>,
     /// 已知被静态占用的地址。后台探测填充，分配路径只读 ——
     /// 查缓存是纳秒级的，不会拖慢握手。
@@ -342,7 +376,7 @@ pub struct ScopePatch {
 }
 
 /// 作用域的运行时快照，给界面用。
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScopeStatus {
     pub id: ScopeId,
@@ -444,6 +478,7 @@ impl AppState {
             token: None,
             new_listener: None,
             config_path: None,
+            discovery_path: None,
             counters: Arc::new(Counters::default()),
             occupied,
             capture: None,
@@ -455,6 +490,53 @@ impl AppState {
     #[must_use]
     pub fn with_config_path(mut self, path: Option<std::path::PathBuf>) -> Self {
         self.config_path = path.map(Into::into);
+        self
+    }
+
+    /// 设置并载入发现状态。状态中已经被删除的作用域会被忽略，不能因为
+    /// 旧缓存“复活”为设备归属。
+    #[must_use]
+    pub fn with_discovery_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.discovery_path = path.map(Into::into);
+        let Some(path) = &self.discovery_path else {
+            return self;
+        };
+        let text = match std::fs::read_to_string(path.as_ref()) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return self,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "发现缓存无法读取，将从空缓存开始");
+                return self;
+            }
+        };
+        let saved: DiscoveryCacheFile = match serde_json::from_str(&text) {
+            Ok(saved) => saved,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "发现缓存格式无效，将从空缓存开始");
+                return self;
+            }
+        };
+        let valid_ids: std::collections::HashSet<ScopeId> = self
+            .inner
+            .try_read()
+            .map(|g| g.server.scopes.iter().map(|scope| scope.id).collect())
+            .unwrap_or_default();
+        if let Ok(mut g) = self.inner.try_write() {
+            g.discoveries = saved
+                .discoveries
+                .into_iter()
+                .filter(|item| valid_ids.contains(&item.scope_id))
+                .map(|item| {
+                    (
+                        item.scope_id,
+                        CachedDiscovery {
+                            scanned_at: item.scanned_at,
+                            devices: item.devices,
+                        },
+                    )
+                })
+                .collect();
+        }
         self
     }
 
@@ -483,6 +565,36 @@ impl AppState {
         {
             tracing::error!(path = %path.display(), error = %e,
                 "配置写回失败 —— 界面上的改动重启后会丢");
+        }
+    }
+
+    /// 原子写入设备发现状态。发现失败不影响 DHCP；下次扫描会再写一次。
+    async fn persist_discoveries(&self) {
+        let Some(path) = &self.discovery_path else {
+            return;
+        };
+        let g = self.inner.read().await;
+        let cache = DiscoveryCacheFile {
+            discoveries: g
+                .discoveries
+                .iter()
+                .map(|(scope_id, discovery)| PersistedDiscovery {
+                    scope_id: *scope_id,
+                    scanned_at: discovery.scanned_at,
+                    devices: discovery.devices.clone(),
+                })
+                .collect(),
+        };
+        drop(g);
+        let Ok(text) = serde_json::to_string_pretty(&cache) else {
+            tracing::error!("发现缓存无法序列化，改动没有写回");
+            return;
+        };
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, text.as_bytes())
+            .and_then(|()| std::fs::rename(&tmp, path.as_ref()))
+        {
+            tracing::error!(path = %path.display(), error = %e, "发现缓存写回失败");
         }
     }
 
@@ -632,15 +744,63 @@ impl AppState {
 
     pub async fn record_discovery(&self, id: ScopeId, devices: Vec<discovery::Device>) {
         let mut g = self.inner.write().await;
-        if g.server.scopes.iter().any(|scope| scope.id == id) {
-            g.discoveries.insert(
-                id,
-                CachedDiscovery {
-                    scanned_at: now(),
-                    devices,
-                },
-            );
+        if !g.server.scopes.iter().any(|scope| scope.id == id) {
+            return;
         }
+        let seen_at = now();
+        let previous = g.discoveries.remove(&id).unwrap_or(CachedDiscovery {
+            scanned_at: 0,
+            devices: Vec::new(),
+        });
+        let mut old: HashMap<Ipv4Addr, CachedDevice> = previous
+            .devices
+            .into_iter()
+            .map(|device| (device.device.ip, device))
+            .collect();
+        let mut merged = Vec::new();
+        for mut device in devices {
+            let first_seen = match old.remove(&device.ip) {
+                Some(previous) => {
+                    if device.mac.is_none() {
+                        device.mac = previous.device.mac;
+                    }
+                    device.is_bmc |= previous.device.is_bmc;
+                    for source in previous.device.via {
+                        if !device.via.contains(&source) {
+                            device.via.push(source);
+                        }
+                    }
+                    if device.note.is_none() {
+                        device.note = previous.device.note;
+                    }
+                    previous.first_seen
+                }
+                None => seen_at,
+            };
+            merged.push(CachedDevice {
+                device,
+                first_seen,
+                last_seen: seen_at,
+            });
+        }
+        // 轻量巡检没有收到响应不代表设备已经消失；保留最近一天的已知结果，
+        // 让使用者依据 lastSeen 判断是否需要重扫。
+        merged.extend(
+            old.into_values().filter(|device| {
+                seen_at.saturating_sub(device.last_seen) <= DISCOVERY_RETENTION_SECS
+            }),
+        );
+        merged.sort_by_key(|device| (!device.device.is_bmc, u32::from(device.device.ip)));
+        g.discoveries.insert(
+            id,
+            CachedDiscovery {
+                scanned_at: seen_at,
+                devices: merged,
+            },
+        );
+        drop(g);
+        self.persist_discoveries().await;
+        self.emit(Event::DevicesChanged);
     }
 
     /// 已缓存的发现结果以及同作用域的租约，用于 API 把“BMC 确认信号”
@@ -655,6 +815,31 @@ impl AppState {
             .filter(|lease| lease.scope_id == id)
             .collect();
         Some((discovery, leases))
+    }
+
+    /// 后台轻量刷新用的直连作用域。它刻意排除 relay、禁用或已经丢失
+    /// 监听器的作用域，不能对无关网段发探测包。
+    pub async fn discovery_targets(&self) -> Vec<(ScopeId, lessor_net::Ipv4Cidr)> {
+        let g = self.inner.read().await;
+        g.server
+            .scopes
+            .iter()
+            .filter(|scope| scope.enabled && !scope.via_relay)
+            .filter_map(|scope| {
+                g.listeners
+                    .iter()
+                    .find(|listener| scope.contains(listener.server_ip))
+                    .map(|listener| {
+                        (
+                            scope.id,
+                            lessor_net::Ipv4Cidr {
+                                addr: listener.server_ip,
+                                prefix: scope.prefix,
+                            },
+                        )
+                    })
+            })
+            .collect()
     }
 
     pub async fn scope_status(&self) -> Vec<ScopeStatus> {
@@ -934,6 +1119,7 @@ impl AppState {
         drop(g);
 
         self.persist().await;
+        self.persist_discoveries().await;
         self.emit(Event::ScopesChanged);
         if dropped > 0 {
             self.emit(Event::LeasesChanged);
@@ -1020,5 +1206,60 @@ impl AppState {
             self.emit(Event::LeasesChanged);
         }
         n
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_scope(id: u32) -> Config {
+        Config {
+            listeners: Vec::new(),
+            scopes: vec![lessor_core::Scope::new(
+                id,
+                "BMC direct",
+                Ipv4Addr::new(192, 168, 1, 0),
+                24,
+            )],
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_cache_survives_restart_and_keeps_scope_identity() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("系统时间应在 epoch 后")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "lessor-discovery-cache-{}-{nonce}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let first = AppState::new(config_with_scope(7)).with_discovery_path(Some(path.clone()));
+        first
+            .record_discovery(
+                ScopeId(7),
+                vec![discovery::Device {
+                    ip: Ipv4Addr::new(192, 168, 1, 120),
+                    mac: None,
+                    via: vec![discovery::Method::Rmcp],
+                    is_bmc: true,
+                    note: Some("回应 IPMI/RMCP".into()),
+                }],
+            )
+            .await;
+
+        let restarted = AppState::new(config_with_scope(7)).with_discovery_path(Some(path.clone()));
+        let (cached, _) = restarted
+            .discovered_devices(ScopeId(7))
+            .await
+            .expect("重启后应恢复同一作用域的缓存");
+        assert_eq!(cached.devices.len(), 1);
+        assert_eq!(cached.devices[0].device.ip, Ipv4Addr::new(192, 168, 1, 120));
+        assert!(cached.devices[0].device.is_bmc);
+
+        let _ = std::fs::remove_file(path);
     }
 }
