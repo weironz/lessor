@@ -1,6 +1,8 @@
 <script>
-  import { onMount } from 'svelte'
-  import { discover, getInterfaces, getState } from './api.js'
+  import { onDestroy, onMount } from 'svelte'
+  import { discover, discoverScope, getInterfaces, getState } from './api.js'
+
+  let { target = null } = $props()
 
   let ifaces = $state([])
   let picked = $state('')
@@ -8,6 +10,14 @@
   let running = $state(false)
   let found = $state(null)
   let err = $state(null)
+  let autoMessage = $state(null)
+  let autoAttempt = $state(0)
+  let dismissedScopeId = $state(null)
+  let autoTrigger = $state(0)
+  let activeRun = 0
+  let lastAutoKey = ''
+
+  const automatic = $derived(target && dismissedScopeId !== target.scopeId)
 
   // 只列出能在上面做发现的网卡：非环回、有 IPv4 地址
   const usable = $derived(ifaces.filter((i) => !i.isLoopback && i.ipv4.length > 0))
@@ -44,16 +54,89 @@
   async function run() {
     const cidr = current?.cidr
     if (!cidr) return
+    // 用户主动改用手动扫描时，让任何尚未返回的自动请求失效。
+    activeRun += 1
+    autoMessage = null
     running = true
     err = null
     try {
-      found = await discover(cidr.addr, cidr.prefix, sweep)
+      found = normalize(await discover(cidr.addr, cidr.prefix, sweep))
     } catch (e) {
       err = e.message
     } finally {
       running = false
     }
   }
+
+  function normalize(result) {
+    const devices = Array.isArray(result) ? result : result?.data?.devices ?? []
+    return devices.map((device) => ({
+      ...device,
+      isBmc: device.isBmc ?? device.kind === 'bmc',
+      via: device.via ?? device.sources ?? [],
+    }))
+  }
+
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  async function runAutomatic(scope) {
+    const run = ++activeRun
+    const maxAttempts = 10
+    found = null
+    err = null
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (run !== activeRun) return
+      autoAttempt = attempt
+      autoMessage = `正在等待 BMC 获取 DHCP 地址并确认 IPMI；第 ${attempt}/${maxAttempts} 次扫描…`
+      running = true
+      try {
+        const result = await discoverScope(scope.scopeId, { sweep: true, waitMs: 1000 })
+        if (run !== activeRun) return
+        found = normalize(result)
+        if (found.some((device) => device.isBmc)) {
+          autoMessage = '已确认 BMC。可直接打开其管理地址，或通过 API / lessorctl 继续自动化。'
+          return
+        }
+      } catch (e) {
+        if (run !== activeRun) return
+        err = e.message
+        autoMessage = null
+        return
+      } finally {
+        if (run === activeRun) running = false
+      }
+
+      if (attempt < maxAttempts) await delay(1500)
+    }
+
+    if (run === activeRun) {
+      autoMessage = '暂未确认 BMC。请确认网线、BMC 已开机且仍为 DHCP 模式，然后重新查找。'
+    }
+  }
+
+  $effect(() => {
+    const scope = automatic ? target : null
+    const key = scope ? `${scope.scopeId}:${autoTrigger}` : ''
+    if (!key || key === lastAutoKey) return
+    lastAutoKey = key
+    void runAutomatic(scope)
+  })
+
+  function retryAutomatic() {
+    autoTrigger += 1
+  }
+
+  function useManual() {
+    dismissedScopeId = target?.scopeId ?? null
+    activeRun += 1
+    running = false
+    autoMessage = null
+  }
+
+  onDestroy(() => {
+    activeRun += 1
+  })
 
   const VIA = { rmcp: 'IPMI 应答', probed: '探测发现', neighbor: '邻居表' }
 </script>
@@ -63,25 +146,39 @@
   这里用 IPMI 的 RMCP 探测、UDP 探测加邻居表把它们找出来。
 </p>
 
-<div class="controls">
-  <label>
-    网卡
-    <select bind:value={picked} disabled={running || usable.length === 0}>
-      {#each addresses as item (item.key)}
-        <option value={item.key}>{item.name} — {item.cidr.addr}/{item.cidr.prefix}</option>
-      {/each}
-    </select>
-  </label>
+{#if automatic}
+  <div class="auto">
+    <div>
+      <strong>已锁定新作用域</strong>
+      <span class="mono">{target.serverIp}/{target.prefix}</span>
+      {#if autoMessage}<p>{autoMessage}</p>{/if}
+    </div>
+    <div class="auto-actions">
+      <button class="primary" onclick={retryAutomatic} disabled={running}>重新查找</button>
+      <button class="secondary" onclick={useManual}>改用手动扫描</button>
+    </div>
+  </div>
+{:else}
+  <div class="controls">
+    <label>
+      网卡
+      <select bind:value={picked} disabled={running || usable.length === 0}>
+        {#each addresses as item (item.key)}
+          <option value={item.key}>{item.name} — {item.cidr.addr}/{item.cidr.prefix}</option>
+        {/each}
+      </select>
+    </label>
 
-  <label class="check">
-    <input type="checkbox" bind:checked={sweep} disabled={running} />
-    逐个探测整个网段
-  </label>
+    <label class="check">
+      <input type="checkbox" bind:checked={sweep} disabled={running} />
+      逐个探测整个网段
+    </label>
 
-  <button class="primary" onclick={run} disabled={running || !current}>
-    {running ? '扫描中…' : '开始扫描'}
-  </button>
-</div>
+    <button class="primary" onclick={run} disabled={running || !current}>
+      {running ? '扫描中…' : '开始扫描'}
+    </button>
+  </div>
+{/if}
 
 {#if usable.length === 0 && !err}
   <div class="empty">没有可用于扫描的网卡。</div>
@@ -145,6 +242,32 @@
     margin-bottom: 16px;
     font-size: 13px;
   }
+  .auto {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+    padding: 12px 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    font-size: 13px;
+  }
+  .auto strong { margin-right: 10px; }
+  .auto p { margin: 6px 0 0; color: var(--muted); }
+  .auto-actions { display: flex; gap: 8px; }
+  .primary, .secondary {
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 13px;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .primary { color: #fff; background: var(--accent); border: 1px solid var(--accent); }
+  .secondary { color: var(--ink); background: transparent; border: 1px solid var(--line); }
+  .primary:disabled, .secondary:disabled { opacity: .55; cursor: default; }
   label {
     display: flex;
     align-items: center;

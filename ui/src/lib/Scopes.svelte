@@ -3,7 +3,7 @@
   import Reservations from './Reservations.svelte'
   import NewScope from './NewScope.svelte'
 
-  let { scopes = [], listeners = [], onchange } = $props()
+  let { scopes = [], listeners = [], onchange, oncreated = null } = $props()
 
   let busy = $state(null)
   let err = $state(null)
@@ -36,9 +36,10 @@
 {#if adding}
   <NewScope
     compact
-    oncreated={() => {
+    oncreated={(target) => {
       adding = false
       onchange?.()
+      oncreated?.(target)
     }}
     oncancel={() => (adding = false)}
   />

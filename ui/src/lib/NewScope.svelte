@@ -62,7 +62,7 @@
     busy = true
     err = null
     try {
-      await createScope({
+      const created = await createScope({
         name: current.name,
         serverIp: c.addr,
         prefix: c.prefix,
@@ -70,7 +70,9 @@
         poolEnd,
         router: c.addr,
       })
-      oncreated?.()
+      // 新建后把“哪一个作用域、哪一个监听地址”交给上层。发现页不再猜
+      // 当前网卡，也不需要用户重新选择一次。
+      oncreated?.({ scopeId: created.id, serverIp: c.addr, prefix: c.prefix })
     } catch (e2) {
       err = e2.message
     } finally {

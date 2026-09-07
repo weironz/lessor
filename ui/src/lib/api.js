@@ -46,6 +46,19 @@ export const discover = (addr, prefix, sweep = true) =>
     body: JSON.stringify({ addr, prefix, sweep }),
   })
 
+// 作用域发现不接受浏览器传入的本机地址：服务端从作用域绑定的监听器取得
+// 目标，避免“DHCP 在 A 网卡、扫描却跑到 B 网卡”的错配。
+export const discoverScope = (id, { sweep = true, waitMs = 1000 } = {}) =>
+  json(`/api/v1/scopes/${id}/discover`, {
+    method: 'POST',
+    body: JSON.stringify({ sweep, waitMs }),
+  })
+
+export const getScopeDevices = (id, { kind } = {}) => {
+  const query = kind ? `?kind=${encodeURIComponent(kind)}` : ''
+  return json(`/api/v1/scopes/${id}/devices${query}`)
+}
+
 /// 连事件流。断开后自动重连 —— 服务重启不该让界面变成死的。
 export function connectEvents({ onEvent, onStatus }) {
   let ws = null

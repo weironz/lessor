@@ -15,6 +15,8 @@
   let leases = $state([])
   let packets = $state([])
   let error = $state(null)
+  // 仅在刚创建作用域后设置；发现页据此锁定监听器而不是重新猜网卡。
+  let discoveryTarget = $state(null)
 
   const TABS = [
     { id: 'scopes', label: '作用域' },
@@ -30,6 +32,12 @@
     } catch (e) {
       error = e.message
     }
+  }
+
+  async function beginDiscovery(target) {
+    await refresh()
+    discoveryTarget = target
+    tab = 'discover'
   }
 
   onMount(() => {
@@ -106,7 +114,7 @@
 {/if}
 
 {#if needsSetup}
-  <NewScope oncreated={refresh} />
+  <NewScope oncreated={beginDiscovery} />
 {:else}
 <nav>
   {#each TABS as t (t.id)}
@@ -121,13 +129,18 @@
 
 <main>
   {#if tab === 'scopes'}
-    <Scopes scopes={state?.scopes ?? []} listeners={state?.listeners ?? []} onchange={refresh} />
+    <Scopes
+      scopes={state?.scopes ?? []}
+      listeners={state?.listeners ?? []}
+      onchange={refresh}
+      oncreated={beginDiscovery}
+    />
   {:else if tab === 'leases'}
     <Leases {leases} onchange={refresh} />
   {:else if tab === 'events'}
     <Events {packets} onclear={() => (packets = [])} />
   {:else}
-    <Discover />
+    <Discover target={discoveryTarget} />
   {/if}
 </main>
 {/if}
