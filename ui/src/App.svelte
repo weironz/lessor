@@ -5,6 +5,7 @@
   import Leases from './lib/Leases.svelte'
   import Events from './lib/Events.svelte'
   import Discover from './lib/Discover.svelte'
+  import Settings from './lib/Settings.svelte'
   import NewScope from './lib/NewScope.svelte'
   import About from './lib/About.svelte'
 
@@ -23,6 +24,7 @@
     { id: 'leases', label: '租约' },
     { id: 'events', label: '实时日志' },
     { id: 'discover', label: '发现设备' },
+    { id: 'settings', label: '设置' },
   ]
 
   async function refresh() {
@@ -36,15 +38,9 @@
 
   async function beginDiscovery(target) {
     await refresh()
-    // scanId 是一次性的触发器。发现页消费它后，重新切换标签页只读缓存。
-    discoveryTarget = { ...target, scanId: `${Date.now()}-${Math.random()}` }
+    // 新建作用域后只定位到对应的发现视图；是否扫描由设置页决定，默认手动。
+    discoveryTarget = target
     tab = 'discover'
-  }
-
-  function markDiscoveryStarted() {
-    if (discoveryTarget?.scanId) {
-      discoveryTarget = { ...discoveryTarget, scanId: null }
-    }
   }
 
   onMount(() => {
@@ -60,7 +56,8 @@
         } else if (
           ev.kind === 'leasesChanged' ||
           ev.kind === 'reaped' ||
-          ev.kind === 'scopesChanged'
+          ev.kind === 'scopesChanged' ||
+          ev.kind === 'settingsChanged'
         ) {
           refresh()
         }
@@ -146,8 +143,10 @@
     <Leases {leases} onchange={refresh} />
   {:else if tab === 'events'}
     <Events {packets} onclear={() => (packets = [])} />
+  {:else if tab === 'settings'}
+    <Settings settings={state?.discovery} onchange={refresh} />
   {:else}
-    <Discover target={discoveryTarget} onautostart={markDiscoveryStarted} />
+    <Discover target={discoveryTarget} settings={state?.discovery} />
   {/if}
 </main>
 {/if}

@@ -6,13 +6,25 @@
 
 use std::time::Duration;
 
-use crate::state::AppState;
+use crate::{
+    config::DiscoveryMode,
+    state::{AppState, now},
+};
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// 配置可随时在界面改，轮询只用来检查是否到期，不代表扫描频率。
+const SETTINGS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 pub async fn run(state: AppState) {
+    let mut last_scan_at = now();
     loop {
-        tokio::time::sleep(REFRESH_INTERVAL).await;
+        tokio::time::sleep(SETTINGS_POLL_INTERVAL).await;
+        let settings = state.discovery_settings().await;
+        if settings.mode != DiscoveryMode::Periodic
+            || now().saturating_sub(last_scan_at) < settings.interval_secs
+        {
+            continue;
+        }
+        last_scan_at = now();
         for (scope_id, target) in state.discovery_targets().await {
             let mut options = discovery::Options::new(target);
             options.sweep = false;

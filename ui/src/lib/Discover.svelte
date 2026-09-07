@@ -1,22 +1,20 @@
 <script>
-  import { onDestroy, onMount } from 'svelte'
+  import { onMount } from 'svelte'
   import { discoverScope, getDevices, getState } from './api.js'
 
-  // target 只在“刚新建作用域”的那一次携带 scanId。正常进入页面只读取缓存。
-  let { target = null, onautostart = null } = $props()
+  let { target = null, settings = null } = $props()
 
   let scopes = $state([])
   let collections = $state([])
   let selectedScope = $state('')
+  let typeFilter = $state('')
   let runningScope = $state(null)
-  let autoMessage = $state(null)
   let err = $state(null)
-  let activeRun = 0
-  let consumedScanId = ''
 
   const directScopes = $derived(
     scopes.filter((scope) => scope.enabled && !scope.viaRelay && scope.listenerPresent),
   )
+  const discoveryDisabled = $derived(settings?.mode === 'disabled')
   const visibleCollections = $derived(
     selectedScope
       ? collections.filter((collection) => String(collection.scope.id) === selectedScope)
@@ -32,7 +30,10 @@
 
   async function loadCached() {
     try {
-      const [state, cached] = await Promise.all([getState(), getDevices()])
+      const [state, cached] = await Promise.all([
+        getState(),
+        getDevices({ kind: typeFilter || undefined }),
+      ])
       scopes = state.scopes
       collections = cached.data ?? []
       if (target?.scopeId && !selectedScope) selectedScope = String(target.scopeId)
@@ -44,72 +45,29 @@
 
   onMount(() => {
     void loadCached()
-    // 页面留着时只刷新已保存的结果；不会额外制造一轮网络扫描。
+    // 页面留着时只刷新缓存；不会额外制造一轮网络扫描。
     const timer = setInterval(() => void loadCached(), 15_000)
     return () => clearInterval(timer)
   })
 
-  function replaceCollection(collection) {
-    collections = [...collections.filter((item) => item.scope.id !== collection.scope.id), collection]
-      .sort((left, right) => left.scope.id - right.scope.id)
-  }
-
-  async function scan(scopeId, { quiet = false } = {}) {
+  async function scan(scopeId) {
+    if (discoveryDisabled) return
     runningScope = scopeId
-    if (!quiet) {
-      err = null
-      autoMessage = null
-    }
+    err = null
     try {
-      const result = await discoverScope(scopeId, { sweep: true, waitMs: 1000 })
-      replaceCollection(result.data)
-      return result.data
+      // 全范围探测只发生在用户明确点击这个按钮时。
+      await discoverScope(scopeId, { sweep: true, waitMs: 1000 })
+      await loadCached()
     } catch (e) {
-      if (!quiet) err = e.message
-      throw e
+      err = e.message
     } finally {
       if (runningScope === scopeId) runningScope = null
     }
   }
 
-  async function runAutomatic(scope) {
-    const run = ++activeRun
-    const attempts = 10
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      if (run !== activeRun) return
-      autoMessage = `正在等待 BMC 获取 DHCP 地址并确认 IPMI；第 ${attempt}/${attempts} 次扫描…`
-      try {
-        const collection = await scan(scope.scopeId, { quiet: true })
-        if (run !== activeRun) return
-        if (collection.devices.some((device) => device.kind === 'bmc')) {
-          autoMessage = '已确认 BMC；该地址已保存在此作用域的发现结果中。'
-          return
-        }
-      } catch (e) {
-        if (run === activeRun) {
-          err = e.message
-          autoMessage = null
-        }
-        return
-      }
-      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 1500))
-    }
-    if (run === activeRun) {
-      autoMessage = '暂未确认 BMC。请确认网线、BMC 已开机且仍为 DHCP 模式，然后点“刷新发现”。'
-    }
-  }
-
-  $effect(() => {
-    const scanId = target?.scanId
-    if (!scanId || scanId === consumedScanId) return
-    consumedScanId = scanId
-    onautostart?.()
-    void runAutomatic(target)
-  })
-
   function refreshSelected() {
     if (!selectedScope) return
-    void scan(Number(selectedScope)).catch(() => {})
+    void scan(Number(selectedScope))
   }
 
   function fmtTime(unix) {
@@ -118,14 +76,10 @@
   }
 
   const VIA = { rmcp: 'IPMI 应答', probed: '探测发现', neighbor: '邻居表' }
-
-  onDestroy(() => {
-    activeRun += 1
-  })
 </script>
 
 <p class="intro">
-  发现结果按 DHCP 作用域保存。进入本页只读取缓存；只有新建作用域或对某个作用域点“刷新发现”才会执行逐地址探测。
+  发现结果按 DHCP 作用域保存。进入本页只读取缓存；逐地址探测只能由你选择作用域后手动触发。
 </p>
 
 <div class="controls">
@@ -138,17 +92,22 @@
       {/each}
     </select>
   </label>
-  <button class="primary" onclick={refreshSelected} disabled={!selectedScope || runningScope !== null}>
+  <label>
+    类型
+    <select bind:value={typeFilter} onchange={() => void loadCached()} disabled={runningScope !== null}>
+      <option value="">全部类型</option>
+      <option value="bmc">仅 BMC（IPMI/RMCP 已确认）</option>
+      <option value="device">其他设备</option>
+    </select>
+  </label>
+  <button class="primary" onclick={refreshSelected} disabled={!selectedScope || runningScope !== null || discoveryDisabled}>
     {runningScope !== null ? '扫描中…' : '刷新发现'}
   </button>
   <button class="secondary" onclick={() => void loadCached()} disabled={runningScope !== null}>刷新列表</button>
 </div>
 
-{#if target && autoMessage}
-  <div class="auto">
-    <strong>新作用域 {target.serverIp}/{target.prefix}</strong>
-    <span>{autoMessage}</span>
-  </div>
+{#if discoveryDisabled}
+  <p class="hint">设备发现已禁用；当前仅展示已保存的缓存。可在“设置”页重新启用。</p>
 {/if}
 
 {#if unscannedScopes.length}
@@ -161,7 +120,7 @@
 {#if err}<p class="err">{err}</p>{/if}
 
 {#if rows.length === 0}
-  <div class="empty">{collections.length ? '所选作用域暂未发现设备。' : '还没有已保存的发现结果。'}</div>
+  <div class="empty">{collections.length ? '所选作用域暂未发现此类型设备。' : '还没有已保存的发现结果。'}</div>
 {:else}
   <div class="tablewrap">
     <table>
@@ -205,14 +164,12 @@
   .intro { margin: 0 0 16px; max-width: 74ch; color: var(--ink-2); font-size: 13px; }
   .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; font-size: 13px; }
   label { display: flex; align-items: center; gap: 7px; color: var(--muted); }
-  select { min-width: 260px; padding: 7px 9px; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; }
+  select { min-width: 190px; padding: 7px 9px; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; }
   .primary, .secondary { padding: 8px 10px; font: inherit; font-size: 13px; border-radius: 5px; cursor: pointer; }
   .primary { color: #fff; background: var(--accent); border: 1px solid var(--accent); }
   .secondary { color: var(--ink); background: transparent; border: 1px solid var(--line); }
   button:disabled { opacity: .55; cursor: default; }
-  .auto, .hint { margin: 0 0 12px; padding: 9px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); font-size: 13px; }
-  .auto { display: flex; gap: 10px; flex-wrap: wrap; }
-  .hint { color: var(--muted); }
+  .hint { margin: 0 0 12px; padding: 9px 12px; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); font-size: 13px; }
   .err { margin: 0 0 12px; padding: 8px 12px; background: var(--danger-bg); color: var(--danger); border-radius: var(--radius); font-size: 13px; }
   td .muted { display: block; margin-top: 2px; font-size: 11px; }
   a { color: var(--accent); }

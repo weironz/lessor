@@ -68,6 +68,9 @@ export const getDevices = ({ kind, scopeId } = {}) => {
   return json(`/api/v1/devices${suffix}`)
 }
 
+export const patchSettings = (body) =>
+  json('/api/settings', { method: 'PATCH', body: JSON.stringify(body) })
+
 /// 连事件流。断开后自动重连 —— 服务重启不该让界面变成死的。
 export function connectEvents({ onEvent, onStatus }) {
   let ws = null

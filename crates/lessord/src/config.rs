@@ -10,6 +10,35 @@ use anyhow::{Context, Result, bail};
 use lessor_core::{Range, Reservation, Scope};
 use serde::{Deserialize, Serialize};
 
+/// 设备发现的运行策略。默认手动，DHCP 服务不应因为刚启动就主动扫网段。
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiscoveryMode {
+    /// 只在用户或 API 明确 POST 时发现。
+    Manual,
+    /// 按固定间隔做低噪音刷新（RMCP 广播 + 邻居表，不逐 IP 探测）。
+    Periodic,
+    /// 拒绝一切发现请求，包括手动 API 调用。
+    Disabled,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverySettings {
+    pub mode: DiscoveryMode,
+    /// 周期模式下的间隔；最低五分钟，防止误配成扫描风暴。
+    pub interval_secs: u64,
+}
+
+impl Default for DiscoverySettings {
+    fn default() -> Self {
+        Self {
+            mode: DiscoveryMode::Manual,
+            interval_secs: 15 * 60,
+        }
+    }
+}
+
 /// 一个监听点：本机在某个网段上的地址，以及（可选的）绑定到哪块网卡。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +56,8 @@ pub struct Listener {
 pub struct Config {
     pub listeners: Vec<Listener>,
     pub scopes: Vec<Scope>,
+    #[serde(default)]
+    pub discovery: DiscoverySettings,
 }
 
 impl Config {
@@ -130,6 +161,7 @@ impl Config {
             let cfg = Self {
                 listeners: Vec::new(),
                 scopes: Vec::new(),
+                discovery: DiscoverySettings::default(),
             };
             cfg.check()?;
             return Ok(cfg);
@@ -158,6 +190,7 @@ impl Config {
             } else {
                 vec![scope]
             },
+            discovery: DiscoverySettings::default(),
         };
         cfg.check()?;
         Ok(cfg)
@@ -406,6 +439,7 @@ mod tests {
                 iface: None,
             }],
             scopes: Vec::new(),
+            discovery: DiscoverySettings::default(),
         };
         assert!(c.check().is_ok(), "零作用域是合法状态，不是配置错误");
     }

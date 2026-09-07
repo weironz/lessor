@@ -161,6 +161,7 @@ mod tests {
         AppState::new(crate::config::Config {
             listeners: Vec::new(),
             scopes: Vec::new(),
+            discovery: crate::config::DiscoverySettings::default(),
         })
     }
 

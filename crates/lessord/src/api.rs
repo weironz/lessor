@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::debug;
 
-use crate::config::Listener;
+use crate::config::{DiscoveryMode, DiscoverySettings, Listener};
 use crate::state::{AppState, DiscoveryTargetError, ScopeStatus, now};
 use crate::ui::Assets;
 
@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/leases", get(get_leases))
         .route("/api/leases/{scope_id}/{ip}", delete(revoke_lease))
         .route("/api/interfaces", get(get_interfaces))
+        .route("/api/settings", patch(patch_settings))
         .route("/api/discover", post(post_discover))
         .route("/api/v1/devices", get(get_devices))
         .route("/api/v1/scopes/{id}/discover", post(post_scope_discover))
@@ -341,6 +342,7 @@ struct StateResponse {
     uptime_secs: u64,
     scopes: Vec<ScopeStatus>,
     listeners: Vec<Listener>,
+    discovery: DiscoverySettings,
     /// 写操作是否需要令牌。界面据此决定要不要提示输入。
     auth_required: bool,
     /// "监听中但一个请求都没收到"时的提示；正常收包时为 `None`。
@@ -359,6 +361,7 @@ async fn get_state(State(st): State<AppState>) -> Json<StateResponse> {
         uptime_secs: now().saturating_sub(st.started_at),
         scopes: st.scope_status().await,
         listeners: st.listeners().await,
+        discovery: st.discovery_settings().await,
         auth_required: st.auth_enabled(),
         quiet_hint: quiet_note.is_some().then(crate::health::quiet_hint),
         quiet_note,
@@ -367,6 +370,30 @@ async fn get_state(State(st): State<AppState>) -> Json<StateResponse> {
 
 async fn get_leases(State(st): State<AppState>) -> Json<Vec<Lease>> {
     Json(st.leases().await)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsPatchRequest {
+    discovery_mode: Option<DiscoveryMode>,
+    discovery_interval_secs: Option<u64>,
+}
+
+async fn patch_settings(
+    State(state): State<AppState>,
+    Json(patch): Json<SettingsPatchRequest>,
+) -> Response {
+    let mut settings = state.discovery_settings().await;
+    if let Some(mode) = patch.discovery_mode {
+        settings.mode = mode;
+    }
+    if let Some(interval_secs) = patch.discovery_interval_secs {
+        settings.interval_secs = interval_secs;
+    }
+    match state.set_discovery_settings(settings.clone()).await {
+        Ok(()) => Json(serde_json::json!({ "discovery": settings })).into_response(),
+        Err(error) => bad_request(&error),
+    }
 }
 
 async fn revoke_lease(
@@ -614,6 +641,15 @@ async fn post_scope_discover(
     Path(id): Path<u32>,
     Json(req): Json<ScopeDiscoverRequest>,
 ) -> Response {
+    if state.discovery_settings().await.mode == DiscoveryMode::Disabled {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "设备发现已在设置中禁用".into(),
+            }),
+        )
+            .into_response();
+    }
     let scope_id = ScopeId(id);
     let target = match state.discovery_target(scope_id).await {
         Ok(target) => target,
@@ -751,6 +787,7 @@ mod tests {
         AppState::new(crate::config::Config {
             listeners: Vec::new(),
             scopes: vec![scope],
+            discovery: crate::config::DiscoverySettings::default(),
         })
     }
 

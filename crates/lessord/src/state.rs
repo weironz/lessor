@@ -12,7 +12,7 @@ use lessor_core::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
 
-use crate::config::{Config, Listener};
+use crate::config::{Config, DiscoveryMode, DiscoverySettings, Listener};
 
 pub fn now() -> UnixTime {
     SystemTime::now()
@@ -55,6 +55,8 @@ pub enum Event {
     LeasesChanged,
     /// 作用域发生变化，前端应重新拉取
     ScopesChanged,
+    /// 设置发生变化，前端应重新拉取。
+    SettingsChanged,
     /// 设备发现缓存发生变化；这不是 DHCP 事件，消费者只需刷新设备视图。
     DevicesChanged,
     /// 定期清理回收了若干条过期租约
@@ -253,6 +255,7 @@ struct Inner {
     listeners: Vec<Listener>,
     store: StoreWithProbe,
     discoveries: HashMap<ScopeId, CachedDiscovery>,
+    discovery_settings: DiscoverySettings,
 }
 
 /// 多久没有再次看见的设备会从缓存中清掉。保留窗口让短暂丢包不会把刚
@@ -463,6 +466,7 @@ impl AppState {
         // 容量给足，慢速的 WebSocket 客户端掉几条事件也不该拖住 DHCP 主循环
         let (events, _) = broadcast::channel(512);
         let occupied = crate::conflict::Occupied::default();
+        let discovery_settings = cfg.discovery.clone();
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 server: ServerConfig::new(cfg.scopes),
@@ -472,6 +476,7 @@ impl AppState {
                     occupied: occupied.clone(),
                 },
                 discoveries: HashMap::new(),
+                discovery_settings,
             })),
             events,
             started_at: now(),
@@ -552,6 +557,7 @@ impl AppState {
         let cfg = Config {
             listeners: g.listeners.clone(),
             scopes: g.server.scopes.clone(),
+            discovery: g.discovery_settings.clone(),
         };
         drop(g);
 
@@ -815,6 +821,24 @@ impl AppState {
             .filter(|lease| lease.scope_id == id)
             .collect();
         Some((discovery, leases))
+    }
+
+    pub async fn discovery_settings(&self) -> DiscoverySettings {
+        self.inner.read().await.discovery_settings.clone()
+    }
+
+    /// 更新发现策略。周期模式下至少五分钟，避免把一次 BMC 定位误配成
+    /// 不停扫网段；手动模式的间隔仅保留为下次切到周期模式时使用。
+    pub async fn set_discovery_settings(&self, settings: DiscoverySettings) -> Result<(), String> {
+        if settings.mode == DiscoveryMode::Periodic
+            && !(5 * 60..=24 * 60 * 60).contains(&settings.interval_secs)
+        {
+            return Err("周期扫描间隔必须在 5 分钟到 24 小时之间".into());
+        }
+        self.inner.write().await.discovery_settings = settings;
+        self.persist().await;
+        self.emit(Event::SettingsChanged);
+        Ok(())
     }
 
     /// 后台轻量刷新用的直连作用域。它刻意排除 relay、禁用或已经丢失
@@ -1222,6 +1246,7 @@ mod tests {
                 Ipv4Addr::new(192, 168, 1, 0),
                 24,
             )],
+            discovery: DiscoverySettings::default(),
         }
     }
 
@@ -1261,5 +1286,19 @@ mod tests {
         assert!(cached.devices[0].device.is_bmc);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn periodic_discovery_rejects_an_unsafe_interval() {
+        let state = AppState::new(config_with_scope(1));
+        let err = state
+            .set_discovery_settings(DiscoverySettings {
+                mode: DiscoveryMode::Periodic,
+                interval_secs: 60,
+            })
+            .await
+            .expect_err("一分钟周期会形成不必要的扫描噪音");
+        assert!(err.contains("5 分钟"));
+        assert_eq!(state.discovery_settings().await.mode, DiscoveryMode::Manual);
     }
 }
