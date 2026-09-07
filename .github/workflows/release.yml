@@ -191,10 +191,14 @@ jobs:
         run: |
           v="${GITHUB_REF_NAME#v}"
           cargo build --release -p lessor-net -p lessorctl
-          mkdir -p out
-          7z a -y -j "out/lessor-$v-x86_64-windows.zip" \
-            ./target/release/lessord.exe ./target/release/lessor-netcfg.exe \
-            ./target/release/lessorctl.exe
+          mkdir -p out/cli
+          cp ./target/release/lessord.exe ./target/release/lessor-netcfg.exe \
+            ./target/release/lessorctl.exe out/cli/
+          (
+            cd out/cli
+            7z a -y "../lessor-$v-x86_64-windows.zip" \
+              lessord.exe lessor-netcfg.exe lessorctl.exe
+          )
 
       - uses: actions/upload-artifact@v4
         with:
