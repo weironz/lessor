@@ -39,11 +39,15 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "Unlicense",
+    # lessorctl → reqwest → rustls 的 TLS 验证链：ring、rustls-webpki、untrusted。
+    "ISC",
+    # lessorctl → reqwest → hyper-rustls → webpki-roots 的信任根数据。
+    "CDLA-Permissive-2.0",
 ]
 # 这份名单只列**依赖树里真正出现过的**许可证。多列几个"反正也宽松"的
 # 等于预先批准了没审过的东西 —— 真混进来一个新许可证时，让 CI 红一次、
 # 逼人看一眼，比它悄悄溜进去强。
-# 现在缺席但常见的：ISC、MPL-2.0、CC0-1.0。要加就在这儿加，顺手写上是
+# 现在缺席但常见的：MPL-2.0、CC0-1.0。要加就在这儿加，顺手写上是
 # 哪个依赖带进来的。
 # 低于这个置信度就当没识别出来，宁可人工看一眼
 confidence-threshold = 0.9
