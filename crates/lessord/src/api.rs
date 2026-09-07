@@ -9,7 +9,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{delete, get, patch, post};
@@ -20,7 +20,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::debug;
 
 use crate::config::Listener;
-use crate::state::{AppState, ScopeStatus, now};
+use crate::state::{AppState, DiscoveryTargetError, ScopeStatus, now};
 use crate::ui::Assets;
 
 pub fn router(state: AppState) -> Router {
@@ -32,6 +32,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/leases/{scope_id}/{ip}", delete(revoke_lease))
         .route("/api/interfaces", get(get_interfaces))
         .route("/api/discover", post(post_discover))
+        .route("/api/v1/scopes/{id}/discover", post(post_scope_discover))
+        .route("/api/v1/scopes/{id}/devices", get(get_scope_devices))
         .route("/api/scopes", post(post_scope))
         .route("/api/scopes/{id}", patch(patch_scope).delete(delete_scope))
         .route("/api/scopes/{id}/reservations", post(post_reservation))
@@ -431,6 +433,177 @@ async fn post_discover(Json(req): Json<DiscoverRequest>) -> Response {
     Json(discovery::scan(opts).await).into_response()
 }
 
+// ---------- 面向自动化的作用域设备 API ----------
+
+/// v1 设备类型是服务端的语义判断，不让 Ansible 自己从 MAC、厂商字符串或
+/// 扫描来源猜测。当前 `bmc` 仅在 RMCP/IPMI 明确确认后给出，宁可漏报也不
+/// 把普通邻居表项目误当成 BMC。
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum DeviceKind {
+    Bmc,
+    Device,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DeviceConfidence {
+    Confirmed,
+    Low,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopeDiscoverRequest {
+    /// 是否逐个探测整个网段；默认开启，超过 discovery 的安全上限时会跳过。
+    #[serde(default = "yes")]
+    sweep: bool,
+    #[serde(default = "default_wait_ms")]
+    wait_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct DevicesQuery {
+    kind: Option<DeviceKind>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceRecord {
+    ip: Ipv4Addr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mac: Option<lessor_core::MacAddr>,
+    kind: DeviceKind,
+    confidence: DeviceConfidence,
+    sources: Vec<discovery::Method>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+    /// 如果设备地址是本服务在该作用域下发的，则把 DHCP 租约一并关联。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease: Option<Lease>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopeDevices {
+    scope_id: ScopeId,
+    scanned_at: u64,
+    devices: Vec<DeviceRecord>,
+}
+
+#[derive(Serialize)]
+struct Data<T> {
+    data: T,
+}
+
+async fn device_collection(
+    state: &AppState,
+    scope_id: ScopeId,
+    kind: Option<DeviceKind>,
+) -> Option<ScopeDevices> {
+    let (discovery, leases) = state.discovered_devices(scope_id).await?;
+    let current = now();
+    let devices = discovery
+        .devices
+        .into_iter()
+        .map(|device| {
+            let device_kind = if device.is_bmc {
+                DeviceKind::Bmc
+            } else {
+                DeviceKind::Device
+            };
+            (device, device_kind)
+        })
+        .filter(|(_, device_kind)| kind.is_none_or(|wanted| wanted == *device_kind))
+        .map(|(device, device_kind)| DeviceRecord {
+            ip: device.ip,
+            mac: device.mac,
+            kind: device_kind,
+            confidence: if device.is_bmc {
+                DeviceConfidence::Confirmed
+            } else {
+                DeviceConfidence::Low
+            },
+            sources: device.via,
+            note: device.note,
+            lease: leases
+                .iter()
+                .find(|lease| lease.ip == device.ip && lease.is_active(current))
+                .cloned(),
+        })
+        .collect();
+    Some(ScopeDevices {
+        scope_id,
+        scanned_at: discovery.scanned_at,
+        devices,
+    })
+}
+
+async fn get_scope_devices(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    Query(query): Query<DevicesQuery>,
+) -> Response {
+    let scope_id = ScopeId(id);
+    match device_collection(&state, scope_id, query.kind).await {
+        Some(devices) => Json(Data { data: devices }).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "这个作用域尚未执行设备发现".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn post_scope_discover(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    Json(req): Json<ScopeDiscoverRequest>,
+) -> Response {
+    let scope_id = ScopeId(id);
+    let target = match state.discovery_target(scope_id).await {
+        Ok(target) => target,
+        Err(DiscoveryTargetError::NotFound(_)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: format!("没有 {scope_id} 这个作用域"),
+                }),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ApiError {
+                    error: error.to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let mut options = discovery::Options::new(target);
+    options.sweep = req.sweep;
+    options.wait = Duration::from_millis(req.wait_ms.clamp(200, 10_000));
+    let devices = discovery::scan(options).await;
+    state.record_discovery(scope_id, devices).await;
+
+    match device_collection(&state, scope_id, None).await {
+        Some(devices) => Json(Data { data: devices }).into_response(),
+        // 作用域可能在扫描期间被删除；不要把旧扫描结果泄露给已经不存在的作用域。
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: format!("作用域 {scope_id} 在发现期间已删除"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 // ---------- 事件流 ----------
 
 async fn events(ws: WebSocketUpgrade, State(st): State<AppState>) -> impl IntoResponse {
@@ -515,4 +688,55 @@ async fn serve_ui(uri: Uri) -> Response {
         ),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_scope() -> AppState {
+        let scope = lessor_core::Scope::new(1, "BMC direct", Ipv4Addr::new(192, 168, 1, 0), 24);
+        AppState::new(crate::config::Config {
+            listeners: Vec::new(),
+            scopes: vec![scope],
+        })
+    }
+
+    #[tokio::test]
+    async fn bmc_filter_returns_only_rmcp_confirmed_devices() {
+        let state = state_with_scope();
+        let scope = ScopeId(1);
+        state
+            .record_discovery(
+                scope,
+                vec![
+                    discovery::Device {
+                        ip: Ipv4Addr::new(192, 168, 1, 101),
+                        mac: None,
+                        via: vec![discovery::Method::Rmcp],
+                        is_bmc: true,
+                        note: Some("回应 IPMI/RMCP".into()),
+                    },
+                    discovery::Device {
+                        ip: Ipv4Addr::new(192, 168, 1, 102),
+                        mac: None,
+                        via: vec![discovery::Method::Probed],
+                        is_bmc: false,
+                        note: None,
+                    },
+                ],
+            )
+            .await;
+
+        let result = device_collection(&state, scope, Some(DeviceKind::Bmc))
+            .await
+            .expect("已缓存的发现结果应可读取");
+        assert_eq!(result.devices.len(), 1);
+        assert_eq!(result.devices[0].ip, Ipv4Addr::new(192, 168, 1, 101));
+        assert_eq!(result.devices[0].kind, DeviceKind::Bmc);
+        assert!(matches!(
+            result.devices[0].confidence,
+            DeviceConfidence::Confirmed
+        ));
+    }
 }

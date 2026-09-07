@@ -1,0 +1,15 @@
+[package]
+name = "lessorctl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "lessor 的自动化命令行客户端"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

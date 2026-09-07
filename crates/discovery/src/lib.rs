@@ -106,6 +106,32 @@ fn broadcast_of(cidr: Ipv4Cidr) -> Ipv4Addr {
     Ipv4Addr::from((u32::from(cidr.addr) & mask) | !mask)
 }
 
+/// 发现结果必须属于选定的二层子网，并且只能是可分配给主机的 IPv4 单播
+/// 地址。系统邻居表是全局的，里面经常混有 VPN、虚拟网卡和 224/239 组播
+/// 组；把它们当成设备返回会让“按类型取 BMC”得到无意义的噪音。
+fn is_host_in(cidr: Ipv4Cidr, ip: Ipv4Addr) -> bool {
+    if ip == cidr.addr
+        || ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+    {
+        return false;
+    }
+
+    let mask = if cidr.prefix >= 32 {
+        u32::MAX
+    } else {
+        u32::MAX
+            .checked_shl(32 - u32::from(cidr.prefix))
+            .unwrap_or(0)
+    };
+    let network = u32::from(cidr.addr) & mask;
+    let broadcast = network | !mask;
+    let value = u32::from(ip);
+    value > network && value < broadcast
+}
+
 /// 往每个候选地址发一个 UDP 包，逼操作系统去做 ARP。
 ///
 /// 端口选 9（discard）—— 对方不回也没关系，我们要的只是链路层的
@@ -146,7 +172,7 @@ pub async fn scan(opts: Options) -> Vec<Device> {
     // 先记下已经在表里的 —— 这些是设备主动说过话留下的
     let before: Vec<Neighbor> = neighbor::neighbors();
     for n in &before {
-        if n.ip != opts.on.addr {
+        if is_host_in(opts.on, n.ip) {
             add(n.ip, Some(n.mac), Method::Neighbor, false, None);
         }
     }
@@ -156,11 +182,14 @@ pub async fn scan(opts: Options) -> Vec<Device> {
     let all = hosts(opts.on);
     let small_enough = (all.len() as u32) <= opts.sweep_limit;
     if opts.sweep && small_enough {
-        rmcp_targets.extend(all.iter().copied().filter(|h| *h != opts.on.addr));
+        rmcp_targets.extend(all.iter().copied().filter(|h| is_host_in(opts.on, *h)));
     }
     match rmcp::sweep(&rmcp_targets, opts.on.addr, opts.wait).await {
         Ok(rs) => {
             for r in rs {
+                if !is_host_in(opts.on, r.addr) {
+                    continue;
+                }
                 add(
                     r.addr,
                     None,
@@ -179,13 +208,16 @@ pub async fn scan(opts: Options) -> Vec<Device> {
 
     // UDP 探测整个网段，然后看邻居表多出了谁
     if opts.sweep && small_enough {
-        let targets: Vec<Ipv4Addr> = all.into_iter().filter(|h| *h != opts.on.addr).collect();
+        let targets: Vec<Ipv4Addr> = all
+            .into_iter()
+            .filter(|h| is_host_in(opts.on, *h))
+            .collect();
         if let Err(e) = provoke(&targets, opts.on.addr).await {
             debug!(error = %e, "UDP 探测失败");
         }
         tokio::time::sleep(opts.wait).await;
         for n in neighbor::neighbors() {
-            if n.ip == opts.on.addr {
+            if !is_host_in(opts.on, n.ip) {
                 continue;
             }
             let known = before.iter().any(|b| b.ip == n.ip);
@@ -338,6 +370,17 @@ mod tests {
         // /31 和 /32 上没有可枚举的主机位，不该产生无意义的探测
         assert!(hosts(cidr(10, 0, 0, 1, 31)).is_empty());
         assert!(hosts(cidr(10, 0, 0, 1, 32)).is_empty());
+    }
+
+    #[test]
+    fn host_filter_keeps_only_unicast_hosts_in_the_selected_subnet() {
+        let on = cidr(192, 168, 1, 100, 24);
+        assert!(is_host_in(on, Ipv4Addr::new(192, 168, 1, 101)));
+        assert!(!is_host_in(on, Ipv4Addr::new(192, 168, 1, 100)));
+        assert!(!is_host_in(on, Ipv4Addr::new(192, 168, 1, 0)));
+        assert!(!is_host_in(on, Ipv4Addr::new(192, 168, 1, 255)));
+        assert!(!is_host_in(on, Ipv4Addr::new(224, 0, 0, 2)));
+        assert!(!is_host_in(on, Ipv4Addr::new(10, 0, 0, 1)));
     }
 
     #[test]

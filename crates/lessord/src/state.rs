@@ -1,5 +1,6 @@
 //! 共享状态与事件流。
 
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -249,6 +250,34 @@ struct Inner {
     server: ServerConfig,
     listeners: Vec<Listener>,
     store: StoreWithProbe,
+    discoveries: HashMap<ScopeId, CachedDiscovery>,
+}
+
+/// 最近一次面向某个作用域的设备发现。缓存和作用域绑定，避免 GET 请求
+/// 意外触发网络扫描；自动化可以明确 POST 一次发现，再稳定地读取结果。
+#[derive(Clone)]
+pub struct CachedDiscovery {
+    pub scanned_at: UnixTime,
+    pub devices: Vec<discovery::Device>,
+}
+
+#[derive(Debug)]
+pub enum DiscoveryTargetError {
+    NotFound(ScopeId),
+    Disabled(ScopeId),
+    ViaRelay(ScopeId),
+    NoListener(ScopeId),
+}
+
+impl std::fmt::Display for DiscoveryTargetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(id) => write!(f, "没有 {id} 这个作用域"),
+            Self::Disabled(id) => write!(f, "作用域 {id} 已禁用"),
+            Self::ViaRelay(id) => write!(f, "作用域 {id} 通过 DHCP relay 服务，不能做二层设备发现"),
+            Self::NoListener(id) => write!(f, "作用域 {id} 没有本机监听地址"),
+        }
+    }
 }
 
 /// 运行计数。常驻部署要能回答"它到底在干活吗" ——
@@ -408,6 +437,7 @@ impl AppState {
                     store: Store::Memory(MemoryStore::new()),
                     occupied: occupied.clone(),
                 },
+                discoveries: HashMap::new(),
             })),
             events,
             started_at: now(),
@@ -566,6 +596,65 @@ impl AppState {
     pub async fn leases(&self) -> Vec<Lease> {
         let g = self.inner.read().await;
         g.store.all()
+    }
+
+    /// 获取一次“在这个作用域上扫描”所需的本机监听地址。
+    ///
+    /// 经 DHCP relay 的作用域没有直接二层链路，不能伪装成直连扫描；禁用
+    /// 的作用域也不应被自动化当成正在提供服务。
+    pub async fn discovery_target(
+        &self,
+        id: ScopeId,
+    ) -> Result<lessor_net::Ipv4Cidr, DiscoveryTargetError> {
+        let g = self.inner.read().await;
+        let scope = g
+            .server
+            .scopes
+            .iter()
+            .find(|scope| scope.id == id)
+            .ok_or(DiscoveryTargetError::NotFound(id))?;
+        if !scope.enabled {
+            return Err(DiscoveryTargetError::Disabled(id));
+        }
+        if scope.via_relay {
+            return Err(DiscoveryTargetError::ViaRelay(id));
+        }
+        let listener = g
+            .listeners
+            .iter()
+            .find(|listener| scope.contains(listener.server_ip))
+            .ok_or(DiscoveryTargetError::NoListener(id))?;
+        Ok(lessor_net::Ipv4Cidr {
+            addr: listener.server_ip,
+            prefix: scope.prefix,
+        })
+    }
+
+    pub async fn record_discovery(&self, id: ScopeId, devices: Vec<discovery::Device>) {
+        let mut g = self.inner.write().await;
+        if g.server.scopes.iter().any(|scope| scope.id == id) {
+            g.discoveries.insert(
+                id,
+                CachedDiscovery {
+                    scanned_at: now(),
+                    devices,
+                },
+            );
+        }
+    }
+
+    /// 已缓存的发现结果以及同作用域的租约，用于 API 把“BMC 确认信号”
+    /// 与 DHCP 分配记录关联起来。
+    pub async fn discovered_devices(&self, id: ScopeId) -> Option<(CachedDiscovery, Vec<Lease>)> {
+        let g = self.inner.read().await;
+        let discovery = g.discoveries.get(&id)?.clone();
+        let leases = g
+            .store
+            .all()
+            .into_iter()
+            .filter(|lease| lease.scope_id == id)
+            .collect();
+        Some((discovery, leases))
     }
 
     pub async fn scope_status(&self) -> Vec<ScopeStatus> {
@@ -841,6 +930,7 @@ impl AppState {
             return Err(format!("没有 {id} 这个作用域"));
         }
         let dropped = g.store.clear_scope(id);
+        g.discoveries.remove(&id);
         drop(g);
 
         self.persist().await;

@@ -123,6 +123,38 @@ DELETE /api/leases/{scope}/{ip}  撤销一条租约
 GET    /api/events             WebSocket，实时推送每个报文的处理结果
 ```
 
+### 给 Ansible 的 BMC 发现接口
+
+作用域是自动化的边界：先由 lessor 在选定网卡上发 DHCP，再只在这个作用域
+对应的二层网段内发现设备。不会从全局邻居表拿 VPN、虚拟网卡或组播地址混进
+结果。
+
+```text
+POST /api/v1/scopes/{id}/discover       明确执行一次该作用域的发现
+GET  /api/v1/scopes/{id}/devices?kind=bmc
+                                         读取最近一次缓存中的已确认 BMC
+```
+
+`bmc` 只在 RMCP/IPMI Presence Ping 明确确认后返回，响应带
+`confidence: "confirmed"` 与关联的 DHCP `lease`（如果该地址正是 lessor
+下发的）。`GET` 不会触发扫描；没有执行过 `POST` 时返回 404，避免自动化
+在无意间扫错网段。
+
+随发行包提供的 `lessorctl` 是这套 API 的脚本化客户端。`wait` 会重复执行
+作用域发现，找到 BMC 后仅向标准输出写一条 JSON；超时退出码为 `3`，适合
+Ansible 的 `until` / `failed_when`：
+
+```bash
+lessorctl device wait --scope 1 --kind bmc --timeout 60
+# {"ip":"192.168.1.101","mac":"a0:42:3f:4f:52:8a","kind":"bmc",...}
+
+lessorctl device list --scope 1 --kind bmc
+```
+
+默认连接 `http://127.0.0.1:8080`；可用 `LESSOR_URL` 改地址，服务端启用
+`--token` 时用 `LESSOR_TOKEN` 提供 Bearer token。MCP 将在这个 v1 契约稳定后
+复用它，不另写扫描和分类逻辑。
+
 界面（作用域、租约、实时日志、发现设备）由同一个进程提供，打开
 `http://127.0.0.1:8080/` 即可。
 

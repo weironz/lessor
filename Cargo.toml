@@ -5,6 +5,7 @@ members = [
     "crates/lessor-net",
     "crates/discovery",
     "crates/lessord",
+    "crates/lessorctl",
 ]
 
 [workspace.package]
@@ -35,6 +36,7 @@ rust-embed = { version = "8", features = ["mime-guess"] }
 # bundled：自带 SQLite 源码一起编，不依赖目标机器上的系统库 ——
 # "一个文件拷过去就跑"的形态容不下运行时依赖
 rusqlite  = { version = "0.40", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [profile.release]
 opt-level = "z"

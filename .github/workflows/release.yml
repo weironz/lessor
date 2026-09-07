@@ -85,7 +85,7 @@ jobs:
 
       - name: 构建 Linux 二进制
         run: |
-          cargo build --release -p lessord -p lessor-net
+          cargo build --release -p lessord -p lessor-net -p lessorctl
           cp target/release/lessord target/release/lessor-netcfg docker/
 
       - name: 打 Linux 命令行压缩包
@@ -93,7 +93,7 @@ jobs:
           v="${GITHUB_REF_NAME#v}"
           mkdir -p out
           tar -czf "out/lessor-$v-x86_64-linux.tar.gz" \
-            -C target/release lessord lessor-netcfg
+            -C target/release lessord lessor-netcfg lessorctl
       - uses: actions/upload-artifact@v4
         with:
           name: cli-linux
@@ -190,10 +190,11 @@ jobs:
         shell: bash
         run: |
           v="${GITHUB_REF_NAME#v}"
-          cargo build --release -p lessor-net
+          cargo build --release -p lessor-net -p lessorctl
           mkdir -p out
           7z a "out/lessor-$v-x86_64-windows.zip" \
-            ./target/release/lessord.exe ./target/release/lessor-netcfg.exe
+            ./target/release/lessord.exe ./target/release/lessor-netcfg.exe \
+            ./target/release/lessorctl.exe
 
       - uses: actions/upload-artifact@v4
         with:
