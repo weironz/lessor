@@ -156,6 +156,42 @@ lessorctl device wait --scope 1 --kind bmc --timeout 60
 lessorctl device list --scope 1 --kind bmc
 ```
 
+#### 安装 CLI
+
+发行包同时包含 `lessord`、`lessor-netcfg` 与 `lessorctl`，安装脚本会把它们
+放在当前用户目录；不需要管理员权限。默认安装最新稳定版，也可用脚本的
+`LESSOR_VERSION`（Linux）或 `-Version`（Windows）参数锁定版本。
+
+Linux（x86_64）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/weironz/lessor/main/scripts/install.sh | sh
+```
+
+指定版本时，先下载脚本再执行：
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/weironz/lessor/main/scripts/install.sh
+LESSOR_VERSION=0.0.7 sh install.sh
+```
+
+Windows PowerShell（x86_64）：
+
+```powershell
+irm https://raw.githubusercontent.com/weironz/lessor/main/scripts/install.ps1 | iex
+```
+
+指定版本：
+
+```powershell
+irm https://raw.githubusercontent.com/weironz/lessor/main/scripts/install.ps1 -OutFile install.ps1
+.\install.ps1 -Version 0.0.7
+```
+
+首次安装后请重新打开终端；Linux 的安装位置为 `~/.local/bin`，Windows 为
+`%LOCALAPPDATA%\lessor\bin`。脚本会提示 PATH 尚未包含该目录时的处理方式。
+执行前也可以先下载并审阅这两份脚本。
+
 默认连接 `http://127.0.0.1:8080`；可用 `LESSOR_URL` 改地址，服务端启用
 `--token` 时用 `LESSOR_TOKEN` 提供 Bearer token。MCP 将在这个 v1 契约稳定后
 复用它，不另写扫描和分类逻辑。

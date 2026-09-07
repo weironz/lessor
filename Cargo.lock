@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "discovery"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "lessor-core",
  "lessor-net",
@@ -870,7 +870,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lessor-core"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "dhcproto",
  "serde",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "lessor-net"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "lessor-core",
  "network-interface",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "lessorctl"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "lessord"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "axum",

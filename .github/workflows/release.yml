@@ -192,7 +192,7 @@ jobs:
           v="${GITHUB_REF_NAME#v}"
           cargo build --release -p lessor-net -p lessorctl
           mkdir -p out
-          7z a "out/lessor-$v-x86_64-windows.zip" \
+          7z a -y -j "out/lessor-$v-x86_64-windows.zip" \
             ./target/release/lessord.exe ./target/release/lessor-netcfg.exe \
             ./target/release/lessorctl.exe
 
@@ -224,6 +224,10 @@ jobs:
           test -n "$(ls dist/*.tar.gz)"    || { echo "::error::缺 Linux 压缩包"; exit 1; }
           test -n "$(ls dist/*.zip)"       || { echo "::error::缺 Windows 压缩包"; exit 1; }
           test -n "$(ls dist/*-setup.exe.sig)" || { echo "::error::缺更新包签名，装不上"; exit 1; }
+          tar -tzf "$(ls dist/*.tar.gz | head -1)" | grep -qx 'lessorctl' || {
+            echo "::error::Linux CLI 压缩包缺 lessorctl"; exit 1; }
+          unzip -Z1 "$(ls dist/*.zip | head -1)" | grep -qx 'lessorctl.exe' || {
+            echo "::error::Windows CLI 压缩包缺 lessorctl.exe"; exit 1; }
 
       # 桌面端的自动更新靠这份清单发现新版本。地址固定指向
       # releases/latest/download/latest.json —— 每次发版覆盖它，

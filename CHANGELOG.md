@@ -8,7 +8,15 @@
 
 ## [Unreleased]
 
+## [0.0.7] - 2026-09-08
+
 ### Added
+
+- 发现设置：默认仅手动发现；可改为 5 分钟至 24 小时的低频轻量刷新，或完全禁用。
+  完整 IP 段扫描只在用户或 API 明确触发时执行
+- 发现设备按类型筛选，BMC 查询可直接读取已确认的缓存结果
+- Linux `curl` 与 Windows PowerShell `irm` CLI 安装脚本，安装包包含
+  `lessord`、`lessor-netcfg` 与 `lessorctl`
 
 - `justfile`：本地开发编排。`just dev` 构建整套（前端 → lessord → sidecar →
   桌面壳，顺序是硬性的），`just app` 拉起桌面端（已在跑的先杀掉），
@@ -247,7 +255,8 @@ lessord --install-service --config /var/lib/lessord/lessor.json ...
   （`registry.cn-shenzhen.aliyuncs.com/willspace/lessord`）镜像；
   NSIS 桌面安装程序；Linux / Windows 命令行压缩包
 
-[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.5...HEAD
+[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.7...HEAD
+[0.0.7]: https://github.com/weironz/lessor/compare/v0.0.6...v0.0.7
 [0.0.5]: https://github.com/weironz/lessor/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/weironz/lessor/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/weironz/lessor/compare/v0.0.2...v0.0.3
