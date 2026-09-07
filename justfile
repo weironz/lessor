@@ -12,10 +12,34 @@ set windows-shell := ["C:/Program Files/Git/bin/bash.exe", "-uc"]
 triple := `rustc -vV | sed -n 's/^host: //p'`
 exe    := if os() == "windows" { ".exe" } else { "" }
 
-# ---------------------------------------------------------------- 日常
+# ---------------------------------------------------------------- 开发循环
 
-[doc("构建本地栈：前端 → lessord → sidecar → 桌面壳")]
-dev: kill
+# Docker 的 dev compose 默认起真实 DHCP 回归实验室：lessord 在隔离的 bridge
+# 网段内，busybox 客户端会实际走一次握手，控制台可访问 http://127.0.0.1:8099。
+# 它不碰笔记本的物理网卡，更不会对现场 BMC 发 DHCP；直连 BMC 调试走 `just app`
+# 或 `just serve`。镜像故意只打包宿主机交叉编译的 Linux 二进制，所以把这一步
+# 作为依赖，保证 `just dev` 真的是“一条命令拉起”，而不是 compose 起到一半才
+# 因为 docker/lessord 不存在而失败。
+[doc("启动 Docker 开发环境（隔离 DHCP 回归实验室，界面 http://127.0.0.1:8099）")]
+dev: _linux-bin
+    cd docker && docker compose -f compose.dev.yml --profile regression up -d --build
+    @echo "Docker 开发环境已启动：lessord 控制台 http://127.0.0.1:8099"
+    @echo "查看日志：just dev-logs；停止并清理：just dev-down"
+
+[doc("跟随 Docker 开发环境的 lessord 日志")]
+dev-logs:
+    cd docker && docker compose -f compose.dev.yml logs -f lessord
+
+[doc("停止 Docker 开发环境；不删除编译缓存和命名卷")]
+dev-down:
+    cd docker && docker compose -f compose.dev.yml --profile regression down --remove-orphans
+
+# `just app` 是本机桌面调试入口。必须先关旧实例：桌面壳会优先 attach 到
+# 127.0.0.1:8080 上已有的 lessord，若留着已安装版本，界面看起来启动成功，
+# 实际却在对旧服务测试。先请求桌面程序正常关闭以尽量让它自己收尾，5 秒后
+# 再强杀；lessord 没有窗口，直接停掉。
+[doc("构建并启动本地桌面开发版（会先关闭已有 lessor 桌面端和服务端）")]
+app: kill
     # 顺序是硬性的，不是习惯问题。
     #
     # 1. 前端必须先构建：ui/dist 是 lessord 的**编译期**依赖
@@ -25,22 +49,14 @@ dev: kill
     #    所以前端改了这里会重编 —— 那条 build.rs 是补上去的，之前
     #    cargo 只盯 .rs 文件，改完前端 `cargo build` 跑几十秒（时间花在
     #    依赖上）起来的却还是旧界面。
-    cargo build --release -p lessord
+    cargo build -p lessord -p lessorctl -p lessor-net
     # 3. **把 lessord 拷进 sidecar 目录**。这一步最容易忘，忘了的症状和
     #    上面那个一模一样：桌面壳拉起的是 binaries/ 里的旧副本，你对着
     #    旧界面调半天。实测踩过。
     mkdir -p ui/src-tauri/binaries
-    cp target/release/lessord{{exe}} ui/src-tauri/binaries/lessord-{{triple}}{{exe}}
+    cp target/debug/lessord{{exe}} ui/src-tauri/binaries/lessord-{{triple}}{{exe}}
     # 4. 桌面壳
-    cd ui/src-tauri && cargo build
-    @echo ""
-    # 反引号在 just 里是命令替换，写进提示语会被真的执行掉 —— 踩过：
-    # 这句原来写成 `just app`，结果每次 just dev 末尾都把桌面端拉起来。
-    @echo "好了。just app 起桌面端；just serve 只起服务用浏览器看。"
-
-[doc("拉起本地桌面端（已经在跑的先杀掉）")]
-app: kill
-    ./ui/src-tauri/target/debug/lessor-desktop{{exe}}
+    cd ui/src-tauri && cargo run
 
 [doc("只起 lessord，用浏览器看界面（不碰桌面壳）")]
 serve addr="192.168.233.1" pool="192.168.233.100-192.168.233.110": kill
@@ -62,12 +78,12 @@ serve addr="192.168.233.1" pool="192.168.233.100-192.168.233.110": kill
 # 没匹配到时只压住了错误**输出**，$? 仍然是 false，powershell -Command
 # 会把它变成退出码 1 —— 于是最常见的情况（什么都没跑）反而让 recipe 失败，
 # 终端上一个字都没有。
-[doc("停掉本机所有 lessor 进程（桌面端、服务、装好的那份）")]
+[doc("停掉本机所有 lessor 进程（桌面端先正常关闭，服务端随后停止）")]
 kill:
     @if command -v powershell >/dev/null 2>&1; then \
-        powershell -NoProfile -Command 'foreach ($p in (Get-Process lessor-desktop,lessord,lessor -ErrorAction SilentlyContinue)) { Write-Host "==> 停掉 $($p.ProcessName) (PID $($p.Id))"; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; if (-not $p.WaitForExit(5000)) { Write-Host "    PID $($p.Id) 没能在 5 秒内退出" } }; exit 0'; \
+        powershell -NoProfile -Command 'foreach ($p in (Get-Process lessor-desktop,lessor -ErrorAction SilentlyContinue)) { Write-Host "==> 关闭桌面端 $($p.ProcessName) (PID $($p.Id)) $($p.Path)"; $null = $p.CloseMainWindow(); if (-not $p.WaitForExit(5000)) { Write-Host "    未在 5 秒内退出，强制停止"; Stop-Process -Id $p.Id -Force; $null = $p.WaitForExit(3000) } }; foreach ($p in (Get-Process lessord -ErrorAction SilentlyContinue)) { Write-Host "==> 停掉服务端 lessord (PID $($p.Id)) $($p.Path)"; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; $null = $p.WaitForExit(5000) }; exit 0'; \
     else \
-        pkill -f 'lessor-desktop|lessord' || true; \
+        pkill -f 'lessor-desktop|lessord|lessor' || true; \
     fi
 
 # ---------------------------------------------------------------- 检查

@@ -301,8 +301,8 @@ docker compose -f compose.prod.yml up -d
 每条 recipe 的注释里写了为什么那么做（多数是踩过的坑）。
 
 ```bash
-just dev      # 构建本地栈：前端 → lessord → sidecar → 桌面壳
-just app      # 拉起桌面端（已经在跑的先杀掉）
+just dev      # 拉起隔离的 Docker DHCP 开发环境（控制台在 127.0.0.1:8099）
+just app      # 关闭旧实例 → 构建 → 启动本地桌面开发版
 just serve    # 只起服务，用浏览器看界面
 just check    # fmt + clippy + 测试
 just linux    # Linux 侧同样一套（本机编译不到 cfg(linux) 的代码）
