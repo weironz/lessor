@@ -390,6 +390,12 @@ pub struct ScopeStatus {
     pub capacity: u64,
     pub used: u64,
     pub reservations: usize,
+    /// 当前界面只支持编辑一个连续地址池。多池的导入配置仍保留，状态接口
+    /// 只投影第一个，避免编辑一个卡片时悄悄覆盖其余池。
+    pub pool_start: Option<Ipv4Addr>,
+    pub pool_end: Option<Ipv4Addr>,
+    pub router: Option<Ipv4Addr>,
+    pub lease_secs: u32,
     /// 本机在该网段上的地址。经中继服务的网段这里是 `None` ——
     /// 那不是配漏了，见下面的 `via_relay`。
     pub server_ip: Option<Ipv4Addr>,
@@ -892,6 +898,10 @@ impl AppState {
                     capacity: s.capacity(),
                     used: g.store.store.used_in(s.id, t),
                     reservations: s.reservations.len(),
+                    pool_start: s.pools.first().map(|pool| pool.start),
+                    pool_end: s.pools.first().map(|pool| pool.end),
+                    router: s.router,
+                    lease_secs: s.lease_secs,
                     server_ip,
                     listener_present,
                     via_relay: s.via_relay,

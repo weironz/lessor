@@ -14,6 +14,7 @@
   const directScopes = $derived(
     scopes.filter((scope) => scope.enabled && !scope.viaRelay && scope.listenerPresent),
   )
+  const relayScopes = $derived(scopes.filter((scope) => scope.enabled && scope.viaRelay))
   const discoveryDisabled = $derived(settings?.mode === 'disabled')
   const visibleCollections = $derived(
     selectedScope
@@ -81,6 +82,9 @@
 <p class="intro">
   发现结果按 DHCP 作用域保存。进入本页只读取缓存；逐地址探测只能由你选择作用域后手动触发。
 </p>
+{#if relayScopes.length}
+  <p class="relay-note">{relayScopes.map((scope) => scope.name).join('、')} 经 DHCP Relay 服务：远端网段无法进行本机 ARP/IPMI 主动扫描，因此不会出现在下方扫描作用域中。BMC 发起 DHCP 后请在“租约”查看其地址。</p>
+{/if}
 
 <div class="controls">
   <label>
@@ -174,6 +178,7 @@
 
 <style>
   .intro { margin: 0 0 16px; max-width: 74ch; color: var(--ink-2); font-size: 13px; }
+  .relay-note { margin: 0 0 16px; padding: 9px 12px; color: #725100; background: var(--warn-bg); border: 1px solid var(--line); border-radius: 5px; font-size: 13px; line-height: 1.5; }
   .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; font-size: 13px; }
   label { display: flex; align-items: center; gap: 7px; color: var(--muted); }
   select { min-width: 190px; padding: 7px 9px; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; }

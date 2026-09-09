@@ -10,6 +10,8 @@
   let confirming = $state(null)
   let managing = $state(null)
   let adding = $state(false)
+  let editing = $state(null)
+  let draft = $state({ name: '', poolStart: '', poolEnd: '', router: '', leaseSecs: '' })
 
   const pct = (s) => (s.capacity === 0 ? 0 : Math.round((s.used / s.capacity) * 100))
 
@@ -29,6 +31,42 @@
 
   const toggle = (s) => run(s.id, () => patchScope(s.id, { enabled: !s.enabled }))
   const remove = (s) => run(s.id, () => deleteScope(s.id))
+
+  function beginEdit(s) {
+    err = null
+    managing = null
+    editing = s.id
+    draft = {
+      name: s.name,
+      poolStart: s.poolStart ?? '',
+      poolEnd: s.poolEnd ?? '',
+      router: s.router ?? '',
+      leaseSecs: String(s.leaseSecs ?? ''),
+    }
+  }
+
+  function saveEdit(s) {
+    const name = draft.name.trim()
+    const poolStart = draft.poolStart.trim()
+    const poolEnd = draft.poolEnd.trim()
+    const router = draft.router.trim()
+    const leaseSecs = Number(draft.leaseSecs)
+    if (!name || !poolStart || !poolEnd || !Number.isInteger(leaseSecs) || leaseSecs < 30) {
+      err = '名称、完整地址池和不少于 30 秒的租期为必填项'
+      return
+    }
+    run(s.id, async () => {
+      await patchScope(s.id, {
+        name,
+        poolStart,
+        poolEnd,
+        // 显式 null 是清空网关；后端用双层 Option 区分它与“不修改”。
+        router: router || null,
+        leaseSecs,
+      })
+      editing = null
+    })
+  }
 </script>
 
 {#if err}<p class="err">{err}</p>{/if}
@@ -79,6 +117,10 @@
           </dd>
           <dt>静态保留</dt>
           <dd class="mono">{s.reservations}</dd>
+          <dt>地址池</dt>
+          <dd class="mono">{s.poolStart && s.poolEnd ? `${s.poolStart} – ${s.poolEnd}` : '仅静态保留'}</dd>
+          <dt>网关</dt>
+          <dd class="mono">{s.router ?? '—'}</dd>
         </dl>
 
 				{#if !s.viaRelay && s.listenerPresent === false}
@@ -96,6 +138,9 @@
         </div>
 
         <div class="acts">
+          <button class="link" onclick={() => (editing === s.id ? (editing = null) : beginEdit(s))}>
+            {editing === s.id ? '收起编辑' : '编辑'}
+          </button>
           <button class="link" onclick={() => (managing = managing === s.id ? null : s.id)}>
             {managing === s.id ? '收起保留' : '静态保留'}
           </button>
@@ -109,6 +154,26 @@
             <button class="link danger" onclick={() => (confirming = s.id)}>删除</button>
           {/if}
         </div>
+
+        {#if editing === s.id}
+          <form class="editor" onsubmit={(e) => { e.preventDefault(); saveEdit(s) }}>
+            <label>名称<input bind:value={draft.name} /></label>
+            <div class="edit-row">
+              <label>地址池起始<input bind:value={draft.poolStart} spellcheck="false" /></label>
+              <label>地址池结束<input bind:value={draft.poolEnd} spellcheck="false" /></label>
+            </div>
+            <div class="edit-row">
+              <label>网关<input bind:value={draft.router} placeholder="可留空" spellcheck="false" /></label>
+              <label>租期（秒）<input bind:value={draft.leaseSecs} inputmode="numeric" spellcheck="false" /></label>
+            </div>
+            {#if s.viaRelay}
+              <p class="hint">Relay 网段、前缀和服务方式不可原地修改；它们决定 giaddr 匹配规则，需新建作用域后再停用旧作用域。</p>
+            {:else}
+              <p class="hint">网段、前缀和监听地址不可原地修改；切换网卡请新建作用域。</p>
+            {/if}
+            <button type="submit" disabled={busy === s.id}>保存修改</button>
+          </form>
+        {/if}
 
         {#if managing === s.id}
           <Reservations scope={s} {onchange} />
@@ -241,5 +306,18 @@
     border-radius: 5px;
     font-size: 12.5px;
     line-height: 1.45;
+  }
+  .editor { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+  .editor label { display: block; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+  .editor input {
+    width: 100%; box-sizing: border-box; margin-top: 4px; padding: 6px 8px;
+    font: inherit; font-size: 12.5px; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 4px;
+  }
+  .edit-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .editor .hint { margin: 2px 0 10px; font-size: 11.5px; color: var(--muted); line-height: 1.4; }
+  .editor button {
+    padding: 6px 10px; font: inherit; font-size: 12.5px; color: #fff;
+    background: var(--accent); border: 1px solid var(--accent); border-radius: 4px; cursor: pointer;
   }
 </style>
