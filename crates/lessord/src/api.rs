@@ -513,6 +513,10 @@ struct DeviceRecord {
     /// 如果设备地址是本服务在该作用域下发的，则把 DHCP 租约一并关联。
     #[serde(skip_serializing_if = "Option::is_none")]
     lease: Option<Lease>,
+    /// True only for the address currently bound by this scope's DHCP service. Discovery history
+    /// intentionally survives a rescan, so consumers must not mistake an old IP for the device's
+    /// current DHCP address.
+    active_lease: bool,
 }
 
 #[derive(Serialize)]
@@ -565,23 +569,27 @@ async fn device_collection(
             (cached, device_kind)
         })
         .filter(|(_, device_kind)| kind.is_none_or(|wanted| wanted == *device_kind))
-        .map(|(cached, device_kind)| DeviceRecord {
-            ip: cached.device.ip,
-            mac: cached.device.mac,
-            kind: device_kind,
-            confidence: if cached.device.is_bmc {
-                DeviceConfidence::Confirmed
-            } else {
-                DeviceConfidence::Low
-            },
-            sources: cached.device.via,
-            note: cached.device.note,
-            first_seen: cached.first_seen,
-            last_seen: cached.last_seen,
-            lease: leases
+        .map(|(cached, device_kind)| {
+            let lease = leases
                 .iter()
                 .find(|lease| lease.ip == cached.device.ip && lease.is_active(current))
-                .cloned(),
+                .cloned();
+            DeviceRecord {
+                ip: cached.device.ip,
+                mac: cached.device.mac,
+                kind: device_kind,
+                confidence: if cached.device.is_bmc {
+                    DeviceConfidence::Confirmed
+                } else {
+                    DeviceConfidence::Low
+                },
+                sources: cached.device.via,
+                note: cached.device.note,
+                first_seen: cached.first_seen,
+                last_seen: cached.last_seen,
+                active_lease: lease.is_some(),
+                lease,
+            }
         })
         .collect();
     Some(ScopeDevices {

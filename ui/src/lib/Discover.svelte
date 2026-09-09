@@ -130,6 +130,7 @@
           <th>网段 / 监听地址</th>
           <th>地址</th>
           <th>MAC</th>
+          <th>DHCP 状态</th>
           <th>类型</th>
           <th>发现方式</th>
           <th>最近发现</th>
@@ -143,6 +144,15 @@
             <td class="mono">{device.scope.subnet}/{device.scope.prefix}<br /><span class="muted">{device.scope.serverIp ?? '经中继'}</span></td>
             <td class="mono">{device.ip}</td>
             <td class="mono">{device.mac ?? '—'}</td>
+            <td>
+              {#if device.activeLease}
+                <span class="pill current">当前租约</span>
+              {:else if device.kind === 'bmc'}
+                <span class="pill stale">历史发现</span>
+              {:else}
+                <span class="muted">未租约</span>
+              {/if}
+            </td>
             <td>
               {#if device.kind === 'bmc'}
                 <span class="pill accent">BMC</span>
@@ -173,4 +183,6 @@
   .err { margin: 0 0 12px; padding: 8px 12px; background: var(--danger-bg); color: var(--danger); border-radius: var(--radius); font-size: 13px; }
   td .muted { display: block; margin-top: 2px; font-size: 11px; }
   a { color: var(--accent); }
+  .pill.current { color: #17653e; border-color: #8fc9a6; background: #e6f5eb; }
+  .pill.stale { color: #74623c; border-color: #d8c889; background: #faf4dd; }
 </style>
