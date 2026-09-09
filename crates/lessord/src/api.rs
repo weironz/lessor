@@ -14,7 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{delete, get, patch, post};
-use lessor_core::{Lease, ScopeId};
+use lessor_core::{ClientId, Lease, LeaseState, ScopeId};
 use lessor_net::Ipv4Cidr;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/settings", patch(patch_settings))
         .route("/api/discover", post(post_discover))
         .route("/api/v1/devices", get(get_devices))
+        .route("/api/v1/lease-candidates", get(get_relay_lease_candidates))
         .route("/api/v1/scopes/{id}/discover", post(post_scope_discover))
         .route("/api/v1/scopes/{id}/devices", get(get_scope_devices))
         .route("/api/scopes", post(post_scope))
@@ -388,6 +389,89 @@ async fn get_leases(State(st): State<AppState>) -> Json<Vec<Lease>> {
     Json(st.leases().await)
 }
 
+// ---------- Relay 租约候选（给 bmc-provisioner 等自动化消费者） ----------
+
+/// Relay 网段没有本机二层链路，不能做 ARP/IPMI 扫描来确认 BMC；但 DHCP ACK
+/// 已经提供了 MAC 与当前地址。这个接口刻意只暴露 **已启用 Relay 作用域** 中
+/// 尚未过期的 Bound 租约，调用方仍须以 Redfish 连接确认它确实是 BMC。
+///
+/// 这不是 `/api/leases` 的替代品：后者是管理界面的原始租约表，稳定的跨程序
+/// 契约应有作用域元数据且不能混入 OFFER、过期和直连网段的普通客户端。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LeaseCandidatesQuery {
+    scope_id: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayLeaseCandidate {
+    scope: ScopeReference,
+    ip: Ipv4Addr,
+    mac: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vendor_class: Option<String>,
+    expires_at: u64,
+    first_seen: u64,
+    last_seen: u64,
+}
+
+/// Read active relay leases as **candidates**, never as asserted BMC identities.
+async fn get_relay_lease_candidates(
+    State(state): State<AppState>,
+    Query(query): Query<LeaseCandidatesQuery>,
+) -> Json<Data<Vec<RelayLeaseCandidate>>> {
+    let scopes: HashMap<ScopeId, ScopeReference> = state
+        .scope_status()
+        .await
+        .into_iter()
+        .filter(|scope| scope.enabled && scope.via_relay)
+        .filter(|scope| query.scope_id.is_none_or(|id| scope.id == ScopeId(id)))
+        .map(|scope| {
+            (
+                scope.id,
+                ScopeReference {
+                    id: scope.id,
+                    name: scope.name,
+                    subnet: scope.subnet,
+                    prefix: scope.prefix,
+                    server_ip: scope.server_ip,
+                },
+            )
+        })
+        .collect();
+    let current = now();
+    let mut candidates: Vec<_> = state
+        .leases()
+        .await
+        .into_iter()
+        .filter(|lease| lease.state == LeaseState::Bound && !lease.is_expired(current))
+        .filter_map(|lease| {
+            let scope = scopes.get(&lease.scope_id)?.clone();
+            // BMC Provisioner uses MAC as its durable inventory identity.  A rare
+            // opaque option-61 identifier is not safe to treat as a MAC, so leave
+            // it out rather than create an unmatchable candidate.
+            let ClientId::Mac(mac) = lease.client else {
+                return None;
+            };
+            Some(RelayLeaseCandidate {
+                scope,
+                ip: lease.ip,
+                mac: mac.to_string(),
+                hostname: lease.hostname,
+                vendor_class: lease.vendor_class,
+                expires_at: lease.expires_at,
+                first_seen: lease.created_at,
+                last_seen: lease.last_seen,
+            })
+        })
+        .collect();
+    candidates.sort_by_key(|candidate| (candidate.scope.id, candidate.ip));
+    Json(Data { data: candidates })
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsPatchRequest {
@@ -548,7 +632,7 @@ struct ScopeDevices {
 
 /// 发现记录的稳定归属是 scopeId；其他字段从当前作用域实时投影，改名或
 /// 调整显示信息不会让缓存保留过期副本。
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScopeReference {
     id: ScopeId,
