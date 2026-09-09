@@ -130,7 +130,7 @@
           <th>网段 / 监听地址</th>
           <th>地址</th>
           <th>MAC</th>
-          <th>DHCP 状态</th>
+          <th>租约 / 发现状态</th>
           <th>类型</th>
           <th>发现方式</th>
           <th>最近发现</th>
