@@ -38,6 +38,12 @@
 
   async function beginDiscovery(target) {
     await refresh()
+    // 逐地址发现依赖本地二层 ARP / IPMI 探测，不适用于远端 Relay 网段。
+    if (target.viaRelay) {
+      discoveryTarget = null
+      tab = 'scopes'
+      return
+    }
     // 新建作用域后只定位到对应的发现视图；是否扫描由设置页决定，默认手动。
     discoveryTarget = target
     tab = 'discover'

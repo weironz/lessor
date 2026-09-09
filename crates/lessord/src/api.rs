@@ -133,13 +133,16 @@ struct ApiError {
 
 /// 界面上建作用域用的最小参数集。
 ///
-/// 子网由 `serverIp` 和 `prefix` 推出 —— 让人填网段容易和监听器对不上，
-/// 而对不上就是"收得到请求也发不出应答"。
+/// 直连作用域的子网由 `serverIp` 和 `prefix` 推出；经中继的作用域则必须
+/// 显式给 `subnet`，因为该网段没有本机网卡可供推导。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NewScope {
     name: Option<String>,
+    /// 本机用于接收中继单播、并作为 option 54 下发的监听地址。
     server_ip: Ipv4Addr,
+    /// 仅 `viaRelay` 时使用的远端网段地址。
+    subnet: Option<Ipv4Addr>,
     prefix: u8,
     pool_start: Ipv4Addr,
     pool_end: Ipv4Addr,
@@ -147,6 +150,8 @@ struct NewScope {
     #[serde(default)]
     dns: Vec<Ipv4Addr>,
     lease_secs: Option<u32>,
+    #[serde(default)]
+    via_relay: bool,
 }
 
 async fn post_scope(State(state): State<AppState>, Json(req): Json<NewScope>) -> Response {
@@ -172,7 +177,16 @@ async fn post_scope(State(state): State<AppState>, Json(req): Json<NewScope>) ->
     let mask = u32::MAX
         .checked_shl(32 - u32::from(req.prefix))
         .unwrap_or(0);
-    let subnet = Ipv4Addr::from(u32::from(req.server_ip) & mask);
+    let subnet = Ipv4Addr::from(
+        u32::from(if req.via_relay {
+            let Some(subnet) = req.subnet else {
+                return bad_request("经 DHCP 中继的作用域需要填写远端网段");
+            };
+            subnet
+        } else {
+            req.server_ip
+        }) & mask,
+    );
 
     let mut scope = lessor_core::Scope::new(
         0,
@@ -183,6 +197,7 @@ async fn post_scope(State(state): State<AppState>, Json(req): Json<NewScope>) ->
     scope.pools = vec![pool];
     scope.router = req.router;
     scope.dns = req.dns;
+    scope.via_relay = req.via_relay;
     if let Some(secs) = req.lease_secs {
         scope.lease_secs = secs;
         scope.offer_secs = 30.min(secs);

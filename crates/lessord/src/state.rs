@@ -1001,8 +1001,8 @@ impl AppState {
 
     /// 运行时新建作用域。
     ///
-    /// 会先跑 `Scope::validate` 与跨对象检查（必须有落在该网段的监听器、
-    /// 不能与已有作用域抢同一个监听器地址）—— 界面上填错不该把服务搞坏。
+    /// 会先跑 `Scope::validate` 与跨对象检查。直连作用域必须有落在该网段的
+    /// 监听器；经中继作用域只要指定一个本机监听地址即可。
     pub async fn add_scope(
         &self,
         mut scope: lessor_core::Scope,
@@ -1011,7 +1011,7 @@ impl AppState {
         let mut g = self.inner.write().await;
 
         let mut problems = Vec::new();
-        if !scope.contains(server_ip) {
+        if !scope.via_relay && !scope.contains(server_ip) {
             problems.push(format!(
                 "监听地址 {server_ip} 不在作用域 {}/{} 内",
                 scope.subnet, scope.prefix
@@ -1037,9 +1037,9 @@ impl AppState {
             }
         }
 
-        // 服务端自己的地址永远不能被分给客户端。即使前端或导入配置把它
-        // 放进了地址池，也通过排除项兜底，避免 IP 冲突把监听地址踢下线。
-        if !scope.exclusions.iter().any(|r| r.contains(server_ip)) {
+        // 直连时服务端自己的地址永远不能被分给客户端。经中继时 server_ip
+        // 在另一个网段，不能把它误塞进这个远端地址池的排除项。
+        if !scope.via_relay && !scope.exclusions.iter().any(|r| r.contains(server_ip)) {
             scope
                 .exclusions
                 .push(lessor_core::Range::new(server_ip, server_ip).expect("单地址范围总是有效"));

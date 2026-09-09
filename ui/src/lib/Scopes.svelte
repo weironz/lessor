@@ -46,7 +46,7 @@
 {:else}
   <div class="toolbar">
     <p>切换到其他网卡或网段时，先新增正确的作用域，再停用或删除旧作用域。</p>
-    <button class="link" onclick={() => (adding = true)}>新增 / 更换网卡</button>
+    <button class="link" onclick={() => (adding = true)}>新增作用域</button>
   </div>
 {/if}
 
