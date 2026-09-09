@@ -147,6 +147,8 @@
             <td>
               {#if device.activeLease}
                 <span class="pill current">当前租约</span>
+              {:else if device.currentAddress}
+                <span class="pill current">当前发现</span>
               {:else if device.kind === 'bmc'}
                 <span class="pill stale">历史发现</span>
               {:else}

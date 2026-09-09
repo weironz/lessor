@@ -3,6 +3,7 @@
 //! 界面是纯客户端，不带任何特权 —— 网络相关的事全在这个进程里做完，
 //! 前端只通过这套接口读状态、下命令。Web 端和 Tauri 桌面端加载的是同一份 UI。
 
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -517,6 +518,9 @@ struct DeviceRecord {
     /// intentionally survives a rescan, so consumers must not mistake an old IP for the device's
     /// current DHCP address.
     active_lease: bool,
+    /// The one address callers should use for this MAC: an active lease wins; otherwise the
+    /// newest confirmed discovery survives daemon restarts where a client has not renewed yet.
+    current_address: bool,
 }
 
 #[derive(Serialize)]
@@ -557,6 +561,30 @@ async fn device_collection(
         .find(|scope| scope.id == scope_id)?;
     let (discovery, leases) = state.discovered_devices(scope_id).await?;
     let current = now();
+    let mut newest_by_identity: HashMap<String, (bool, u64, Ipv4Addr)> = HashMap::new();
+    for cached in &discovery.devices {
+        let active_lease = leases
+            .iter()
+            .any(|lease| lease.ip == cached.device.ip && lease.is_active(current));
+        let identity = cached
+            .device
+            .mac
+            .map(|mac| mac.to_string())
+            .unwrap_or_else(|| format!("ip:{}", cached.device.ip));
+        let replace = newest_by_identity
+            .get(&identity)
+            .is_none_or(|(was_active, last_seen, _)| {
+                (active_lease && !was_active)
+                    || (active_lease == *was_active && cached.last_seen > *last_seen)
+            });
+        if replace {
+            newest_by_identity.insert(identity, (active_lease, cached.last_seen, cached.device.ip));
+        }
+    }
+    let current_addresses: HashSet<Ipv4Addr> = newest_by_identity
+        .into_values()
+        .map(|(_, _, ip)| ip)
+        .collect();
     let devices = discovery
         .devices
         .into_iter()
@@ -588,6 +616,7 @@ async fn device_collection(
                 first_seen: cached.first_seen,
                 last_seen: cached.last_seen,
                 active_lease: lease.is_some(),
+                current_address: current_addresses.contains(&cached.device.ip),
                 lease,
             }
         })
