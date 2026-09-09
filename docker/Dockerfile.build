@@ -1,0 +1,22 @@
+# 用于没有预构建交叉编译二进制的现场部署。发布镜像仍使用 Dockerfile，
+# 这个变体在 Linux Docker 主机内构建 lessord 和嵌入式 Web UI。
+FROM oven/bun:1 AS ui-build
+WORKDIR /src/ui
+COPY ui/package.json ui/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY ui/ ./
+RUN bun run build
+
+FROM rust:1.98-bookworm AS service-build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ ./crates/
+COPY --from=ui-build /src/ui/dist ./ui/dist
+RUN cargo build --release --locked -p lessord
+
+FROM debian:trixie-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=service-build /src/target/release/lessord /usr/local/bin/lessord
+ENTRYPOINT ["/usr/local/bin/lessord"]
