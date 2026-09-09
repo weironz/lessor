@@ -8,6 +8,16 @@
 
 ## [Unreleased]
 
+## [0.0.9] - 2026-09-10
+
+### Added
+
+- 经 DHCP Relay 服务的作用域可在界面中创建，并可编辑名称、地址池、网关与租期；
+  Relay 的远端网段和 `giaddr` 匹配关系保持不可变，避免修改中误服务其他 VLAN
+- `GET /api/v1/lease-candidates`：仅返回已启用 Relay 作用域中未过期的 Bound
+  租约（作用域、IP、MAC 与时间），供 BMC Provisioner 在 Redfish 验证前取得候选地址
+- `docker/Dockerfile.build`：在 Linux Docker 主机上直接构建 lessord，便于现场验证
+
 ## [0.0.8] - 2026-09-10
 
 ### Fixed
@@ -264,7 +274,8 @@ lessord --install-service --config /var/lib/lessord/lessor.json ...
   （`registry.cn-shenzhen.aliyuncs.com/willspace/lessord`）镜像；
   NSIS 桌面安装程序；Linux / Windows 命令行压缩包
 
-[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.8...HEAD
+[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.9...HEAD
+[0.0.9]: https://github.com/weironz/lessor/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/weironz/lessor/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/weironz/lessor/compare/v0.0.6...v0.0.7
 [0.0.5]: https://github.com/weironz/lessor/compare/v0.0.4...v0.0.5
