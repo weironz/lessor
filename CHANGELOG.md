@@ -8,6 +8,15 @@
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-09-10
+
+### Fixed
+
+- 发现设备以 MAC 追踪同一台 BMC 的地址变化：当前 DHCP 地址与历史地址明确区分，
+  重启后也不会把历史记录误判为当前地址
+- 桌面端创建的作用域、租约与发现状态会持久化；重启客户端后可继续查看和使用
+- DHCP 状态列改为“当前发现 / 历史发现”，避免把已切为静态 IP 的 BMC 误解为丢失租约
+
 ## [0.0.7] - 2026-09-08
 
 ### Added
@@ -255,7 +264,8 @@ lessord --install-service --config /var/lib/lessord/lessor.json ...
   （`registry.cn-shenzhen.aliyuncs.com/willspace/lessord`）镜像；
   NSIS 桌面安装程序；Linux / Windows 命令行压缩包
 
-[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.7...HEAD
+[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.8...HEAD
+[0.0.8]: https://github.com/weironz/lessor/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/weironz/lessor/compare/v0.0.6...v0.0.7
 [0.0.5]: https://github.com/weironz/lessor/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/weironz/lessor/compare/v0.0.3...v0.0.4
