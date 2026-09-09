@@ -10,10 +10,12 @@
 //    "还没有作用域"这件事由界面自己用空状态表单处理，不属于外壳的职责。
 //
 // 所以外壳不收集任何配置参数 —— 选网卡、填地址池都发生在应用里面。
-// 拉起的实例是临时的现场实例，窗口关闭即回收（强杀由 Job Object 兜底）。
+// 拉起的实例会把作用域配置和租约保存在当前用户的应用数据目录；窗口关闭时
+// 服务仍会被回收（强杀由 Job Object 兜底），下次启动再从这些本地数据恢复。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::fs;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -145,18 +147,38 @@ fn pick_http_port() -> u16 {
     8080
 }
 
+/// 本机桌面实例所持有的数据文件。
+///
+/// 不放在安装目录：安装程序升级时会覆盖那里，而且普通用户通常没有写权限。
+/// 这两个文件只属于外壳自行拉起的 lessord；`LESSOR_URL` 连到外部服务时，
+/// 仍由外部服务自行决定配置与租约保存的位置。
+fn local_data_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("找不到应用数据目录：{error}"))?;
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("无法创建应用数据目录 {}：{error}", dir.display()))?;
+    Ok((dir.join("lessor.json"), dir.join("leases.sqlite3")))
+}
+
 /// 静默拉起一个不带作用域的本机实例，返回它的界面地址。
 ///
 /// `--serve-empty` 让它在没有作用域时也把监听器和 HTTP 接口起起来 ——
 /// 零作用域时不应答任何 DHCP 请求，所以这一步是安全的：
 /// 用户还没选网卡，我们绝不能先替他往网络上发地址。
-fn spawn_local(state: &LocalServer) -> Result<String, String> {
+fn spawn_local(app: &tauri::AppHandle, state: &LocalServer) -> Result<String, String> {
     let bin = sidecar_path().ok_or("没找到随包自带的 lessord，可能安装不完整")?;
+    let (config_path, lease_db_path) = local_data_paths(app)?;
     let port = pick_http_port();
     let http = format!("127.0.0.1:{port}");
 
     let mut cmd = Command::new(&bin);
     cmd.arg("--serve-empty")
+        .arg("--config")
+        .arg(config_path)
+        .arg("--lease-db")
+        .arg(lease_db_path)
         .arg("--http")
         .arg(&http)
         .stdin(Stdio::null())
@@ -240,7 +262,8 @@ fn main() {
                 url
             } else {
                 let state = app.state::<LocalServer>();
-                spawn_local(&state).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+                spawn_local(app.handle(), &state)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
             };
 
             let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target.parse()?))
