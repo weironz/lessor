@@ -173,7 +173,21 @@ jobs:
             echo "::error::缺少 TAURI_SIGNING_PRIVATE_KEY —— 没有它自动更新装不上，见 docs/desktop-update.md"
             exit 1
           }
-          bunx tauri build --bundles nsis
+          # Tauri 首次打包会从其发行站下载 NSIS 工具。该站偶发 5xx 时，
+          # 重试完整打包是安全且幂等的；Rust 产物会复用缓存，避免一次临时网络
+          # 故障让整个 GitHub Release 永久卡在半途。
+          for attempt in 1 2 3; do
+            if bunx tauri build --bundles nsis; then
+              exit 0
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::NSIS 桌面端打包连续 3 次失败"
+              exit 1
+            fi
+            delay=$((attempt * 15))
+            echo "::warning::NSIS 打包第 $attempt 次失败，${delay}s 后重试"
+            sleep "$delay"
+          done
         shell: bash
 
       # 更新用的签名文件跟着安装程序一起发。桌面端下载安装程序之后，
