@@ -77,10 +77,17 @@
   }
 
   const VIA = { rmcp: 'IPMI 应答', probed: '探测发现', neighbor: '邻居表' }
+
+  function discoveryEvidence(device) {
+    if (device.sources.includes('rmcp')) return '曾收到 IPMI 响应'
+    if (device.sources.includes('probed')) return '地址探测发现'
+    if (device.sources.includes('neighbor')) return '来自邻居表；未验证在线'
+    return '已保存的发现记录'
+  }
 </script>
 
 <p class="intro">
-  发现结果按 DHCP 作用域保存。进入本页只读取缓存；逐地址探测只能由你选择作用域后手动触发。
+  DHCP 租约与设备发现是两类独立记录：租约有效仅表示地址仍被 DHCP 保留，不代表设备在线或仍使用 DHCP；发现地址则来自 IPMI、探测或邻居表。进入本页只读取缓存；逐地址探测只能由你选择作用域后手动触发。
 </p>
 {#if relayScopes.length}
   <p class="relay-note">{relayScopes.map((scope) => scope.name).join('、')} 经 DHCP Relay 服务：远端网段无法进行本机 ARP/IPMI 主动扫描，因此不会出现在下方扫描作用域中。BMC 发起 DHCP 后请在“租约”查看其地址。</p>
@@ -134,7 +141,8 @@
           <th>网段 / 监听地址</th>
           <th>地址</th>
           <th>MAC</th>
-          <th>租约 / 发现状态</th>
+          <th>DHCP 租约</th>
+          <th>地址发现</th>
           <th>类型</th>
           <th>发现方式</th>
           <th>最近发现</th>
@@ -150,13 +158,24 @@
             <td class="mono">{device.mac ?? '—'}</td>
             <td>
               {#if device.activeLease}
-                <span class="pill current">当前租约</span>
-              {:else if device.currentAddress}
-                <span class="pill current">当前发现</span>
-              {:else if device.kind === 'bmc'}
-                <span class="pill stale">历史发现</span>
+                <span class="pill current">有效至 {fmtTime(device.lease?.expiresAt)}</span>
+                <span class="muted">DHCP 已保留；未代表在线</span>
+              {:else if device.lease}
+                <span class="pill stale">非有效租约</span>
+                <span class="muted">不再由 DHCP 保留</span>
               {:else}
-                <span class="muted">未租约</span>
+                <span class="muted">无有效 DHCP 租约</span>
+              {/if}
+            </td>
+            <td>
+              {#if device.currentAddress}
+                <span class="pill current">最新发现地址</span>
+                <span class="muted">{discoveryEvidence(device)}</span>
+              {:else if device.kind === 'bmc'}
+                <span class="pill stale">历史发现地址</span>
+                <span class="muted">当前 MAC 的更新地址见其他行</span>
+              {:else}
+                <span class="muted">历史发现记录</span>
               {/if}
             </td>
             <td>
