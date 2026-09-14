@@ -24,7 +24,7 @@
       return `更新包的签名验不过，已拒绝安装。这可能是下载被篡改，也可能是这个版本打包时用的密钥和本程序内置的公钥对不上。（${raw}）`
     }
     if (/PUBKEY_PLACEHOLDER/.test(raw)) {
-      return '本程序打包时没有配更新公钥，自动更新不可用。请从项目主页手工下载新版本。'
+      return '本程序打包时没有配更新公钥，自动更新不可用。请手工下载安装新版本。'
     }
     return raw
   }
@@ -88,11 +88,6 @@
 
   <p class="muted small">
     跨平台 DHCP 服务器。界面已打进 <code>lessord</code> 二进制，一个文件即可运行。
-  </p>
-
-  <p class="links small">
-    <a href="https://github.com/weironz/lessor" target="_blank" rel="noreferrer">项目主页</a>
-    <a href="https://github.com/weironz/lessor/blob/main/CHANGELOG.md" target="_blank" rel="noreferrer">更新日志</a>
   </p>
 
   {#if desktop}
@@ -187,10 +182,6 @@
   }
   .small {
     font-size: 12px;
-  }
-  .links {
-    display: flex;
-    gap: 14px;
   }
   .upd {
     margin-top: 14px;
