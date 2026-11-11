@@ -26,7 +26,8 @@
 
 ## 状态
 
-早期开发中，**还不能用**。
+已发布到 v0.0.10，桌面端、常驻服务、中继与网络引导都在实际使用中。
+还没有生产环境长期运行记录，接口与配置格式在 1.0 之前仍可能变。
 
 - [x] `lessor-core` —— 地址池、租约状态机、报文决策
 - [x] `lessord` —— tokio UDP 循环 + axum HTTP/WebSocket
@@ -34,11 +35,12 @@
 - [x] `discovery` —— 发现已配置静态 IP 的设备
 - [x] Web UI —— Svelte + Vite，打包进二进制
 - [x] 桌面端 —— Tauri 套同一份 UI
+- [x] 自带引导文件服务 —— `--boot-dir` 起只读 TFTP + HTTP，装机不再需要外部服务器
 
 路线图见 [ROADMAP.md](ROADMAP.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，
 已完成里程碑的验收证据见 [ROADMAP-done.md](ROADMAP-done.md)。
 
-共 129 个测试。已用五种真实客户端验证过：
+共 178 个测试。已用五种真实客户端验证过：
 
 | 客户端 | 验到哪一步 |
 | --- | --- |
@@ -113,6 +115,16 @@ cargo run -p lessord --   --listen 192.168.88.1 --prefix 24 --pool 192.168.88.10
 ```
 
 `--listen` 是本机在该网段上的地址，子网由它和 `--prefix` 推出。
+
+装机场景再加一个 `--boot-dir`，引导文件就由它自己发：
+
+```bash
+cargo run -p lessord -- --listen 192.168.88.1 --prefix 24 \
+  --pool 192.168.88.100-192.168.88.199 --router 192.168.88.1 --boot-dir /srv/boot
+```
+
+目录里放 `ipxe.efi` / `bootx64.efi` / `boot.ipxe` 即可，
+详见 [docs/boot-server.md](docs/boot-server.md)。
 
 HTTP 接口默认只听 `127.0.0.1:8080` —— 这是管理接口，不该暴露到网络上。
 
@@ -258,6 +270,8 @@ just e2e
 - 无配置文件的快捷启动，含 `--reservation MAC=IP[=主机名]` 与
   `--boot-file` / `--next-server` / `--tftp-server`；
   另有 `--http-boot-url` 和 `--ipxe-url`，按客户端类别分别下发
+- **自带引导文件服务**：`--boot-dir` 起一个只读 TFTP + HTTP，按目录里
+  实际存在的文件推导引导目标；引导参数也能在运行时通过 API 改
 - 后台定期回收过期租约
 
 ### lessor-net / discovery

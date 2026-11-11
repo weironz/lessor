@@ -81,8 +81,18 @@ grep -vE '^\s*#|^\s*$' /var/snap/maas/common/maas/dhcpd.conf
 
 ## 五、让 TFTP 也真的跑起来
 
-DHCP 通了只是一半。lessor 不提供 TFTP，但要验证它下发的 `next-server` 和
-文件名确实被用上了，就得有人应答：
+DHCP 通了只是一半。要验证它下发的 `next-server` 和文件名确实被用上了，
+就得有人应答。lessor 现在自己能应答（只读 TFTP + HTTP）：
+
+```bash
+lessord --listen 192.168.88.1 --prefix 24 \
+        --pool 192.168.88.100-192.168.88.199 \
+        --boot-dir ./tftproot
+```
+
+目录里放什么、引导目标怎么推导，见 [内置引导文件服务](boot-server.md)。
+
+只想单独验 TFTP 一层、不想让 lessor 掺进来，用脚本兜底：
 
 ```bash
 python scripts/tftpd.py ./tftproot 192.168.88.1

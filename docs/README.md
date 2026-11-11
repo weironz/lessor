@@ -25,6 +25,10 @@
 
 ## PXE / 网络引导
 
+- [**内置引导文件服务**](boot-server.md) ——
+  `--boot-dir` 一条命令起 DHCP + TFTP + HTTP，目录里放几个文件就能装机；
+  推出引导目标的规则、TFTP 的选项协商与重传、HTTP 的只读边界、
+  以及"它不做什么"（不生成菜单、不管内核从哪来）。
 - [**引导客户端识别**](pxe-client-identification.md) ——
   从 option 60 / option 77 分出 PXE 固件、UEFI HTTP Boot、iPXE 三类，
   各发各的引导目标；架构码怎么读；同一台机器在固件阶段和操作系统阶段

@@ -365,6 +365,9 @@ pub struct AppState {
     capture: Option<Arc<crate::capture::Capture>>,
     /// 只看不答。挂在生产网段上取证时必须开 —— 那儿已经有别人在发地址了。
     observe: bool,
+    /// `--boot-dir` 推出来的引导目标。界面上新建的作用域没有显式配引导
+    /// 时沿用它，免得"命令行起了文件服务，界面上建的作用域却不下发"。
+    default_boot: Option<Arc<lessor_core::BootConfig>>,
 }
 
 /// 作用域可改的部分。`None` 表示不动这一项。
@@ -376,6 +379,8 @@ pub struct ScopePatch {
     pub router: Option<Option<Ipv4Addr>>,
     pub dns: Option<Vec<Ipv4Addr>>,
     pub lease_secs: Option<u32>,
+    /// 网络引导参数。`Some(None)` 是显式清空。
+    pub boot: Option<Option<lessor_core::BootConfig>>,
 }
 
 /// 作用域的运行时快照，给界面用。
@@ -405,6 +410,10 @@ pub struct ScopeStatus {
     /// 这个网段是经 DHCP 中继服务的。界面据此把"没有本机地址"标成
     /// 有意为之，而不是显示成一个说不清的空值。
     pub via_relay: bool,
+    /// 网络引导参数。界面上的摘要据此显示 —— 只写不能读的话，
+    /// 改一个 URL 就得把整块重填一遍。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub boot: Option<lessor_core::BootConfig>,
 }
 
 impl AppState {
@@ -494,7 +503,16 @@ impl AppState {
             occupied,
             capture: None,
             observe: false,
+            default_boot: None,
         }
+    }
+
+    /// `--boot-dir` 推出来的引导目标。运行时新建的作用域没显式配引导时，
+    /// 沿用它 —— 否则命令行起了文件服务，界面上建的作用域却不下发引导目标。
+    #[must_use]
+    pub fn with_default_boot(mut self, boot: Option<lessor_core::BootConfig>) -> Self {
+        self.default_boot = boot.map(Arc::new);
+        self
     }
 
     /// 让配置改动写回这个文件。常驻部署应当给上。
@@ -905,6 +923,7 @@ impl AppState {
                     server_ip,
                     listener_present,
                     via_relay: s.via_relay,
+                    boot: s.boot.clone(),
                 }
             })
             .collect()
@@ -1018,6 +1037,12 @@ impl AppState {
         mut scope: lessor_core::Scope,
         server_ip: Ipv4Addr,
     ) -> Result<ScopeId, Vec<String>> {
+        // 运行时新建的作用域也要能装机：没有显式配引导参数时沿用
+        // --boot-dir 推出来的那份，和启动时载入的作用域保持一致。
+        if scope.boot.is_none() {
+            scope.boot = self.default_boot.as_deref().cloned();
+        }
+
         let mut g = self.inner.write().await;
 
         let mut problems = Vec::new();
@@ -1055,6 +1080,7 @@ impl AppState {
                 .push(lessor_core::Range::new(server_ip, server_ip).expect("单地址范围总是有效"));
         }
         problems.extend(scope.validate().iter().map(ToString::to_string));
+        problems.extend(scope.boot_problems());
         if let Some(conflict) = g.server.scopes.iter().find(|s| {
             g.listeners
                 .iter()
@@ -1123,8 +1149,12 @@ impl AppState {
             next.lease_secs = secs;
             next.offer_secs = next.offer_secs.min(secs);
         }
+        if let Some(boot) = patch.boot {
+            next.boot = boot.filter(|b| !b.is_empty());
+        }
 
-        let problems: Vec<String> = next.validate().iter().map(ToString::to_string).collect();
+        let mut problems: Vec<String> = next.validate().iter().map(ToString::to_string).collect();
+        problems.extend(next.boot_problems());
         if !problems.is_empty() {
             return Err(problems);
         }

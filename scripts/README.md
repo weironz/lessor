@@ -87,8 +87,10 @@ python scripts/vm_console.py 5902 shot.png
 
 ## tftpd.py
 
-临时 TFTP 服务器，只读，只实现 RRQ。lessor 本身不提供 TFTP ——
-这个脚本是用来验证它下发的 `next-server` 和引导文件名确实被固件用上了。
+临时 TFTP 服务器，只读，只实现 RRQ。**lessord 现在自带只读 TFTP**
+（`--boot-dir`，见 [docs/boot-server.md](../docs/boot-server.md)），
+这个脚本留着是为了"只想单独验 TFTP 一层"时不碰 lessord 的配置 ——
+比如在已有服务旁边起一个，看它到底发了哪个文件名。
 
 ```bash
 python scripts/tftpd.py ./tftproot 192.168.88.1

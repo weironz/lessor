@@ -102,6 +102,48 @@ impl BootConfig {
             && self.http_url.is_none()
             && self.ipxe_url.is_none()
     }
+
+    /// 引导参数里的硬错误。
+    ///
+    /// URL 类字段必须是完整 URL：UEFI HTTP Boot 和 iPXE 拿到一个裸文件名
+    /// 会当 URL 解析然后什么也不做 —— 现象是"地址拿到了，机器不动"，
+    /// 现场极难联想到是配置写错了。所以启动时就拦下来。
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (field, value) in [
+            ("httpUrl", self.http_url.as_deref()),
+            ("ipxeUrl", self.ipxe_url.as_deref()),
+        ] {
+            if let Some(v) = value.filter(|v| !v.is_empty())
+                && !looks_like_url(v)
+            {
+                out.push(format!(
+                    "{field} 必须是 http:// 或 https:// 开头的完整 URL，收到 {v}"
+                ));
+            }
+        }
+        out
+    }
+
+    /// 不阻止启动、但值得说出来的配置风险。
+    ///
+    /// 典型的是无限自举：固件拉起 iPXE，iPXE 再问一次 DHCP，如果没配
+    /// 专门的脚本 URL 就会拿到和固件一样的引导文件 —— 也就是它自己。
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.ipxe_url.is_none()
+            && let Some(f) = self.filename.as_deref()
+        {
+            let low = f.to_ascii_lowercase();
+            if low.contains("ipxe") || low.ends_with(".kpxe") {
+                out.push(format!(
+                    "引导文件 {f} 看起来就是 iPXE 自己，却没有配 ipxeUrl —— \
+                     iPXE 起来后会再拿到它，无限自举。给它一个脚本 URL。"
+                ));
+            }
+        }
+        out
+    }
 }
 
 fn looks_like_url(s: &str) -> bool {
@@ -225,6 +267,22 @@ impl Scope {
         self.extra_options
             .iter()
             .any(|(code, value)| *code == VENDOR_SPECIFIC && !value.is_empty())
+    }
+
+    /// 引导参数的问题单独收集：`ScopeError` 是地址/租期那一类枚举，
+    /// 把 URL 格式错误塞进去不合适。配置加载和运行时改配置都走这里，
+    /// 免得两条路径的校验再分叉。
+    pub fn boot_problems(&self) -> Vec<String> {
+        self.boot
+            .as_ref()
+            .map_or_else(Vec::new, BootConfig::problems)
+    }
+
+    /// 启动/改配置时值得告警但不拦下来的引导配置风险。
+    pub fn boot_warnings(&self) -> Vec<String> {
+        self.boot
+            .as_ref()
+            .map_or_else(Vec::new, BootConfig::warnings)
     }
 
     pub fn netmask(&self) -> Ipv4Addr {

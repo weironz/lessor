@@ -89,6 +89,11 @@ impl Config {
             for e in s.validate() {
                 problems.push(format!("作用域 {}（{}）: {e}", s.name, s.id));
             }
+            // 引导参数是界面上唯一能填自由文本的地方，URL 写错了固件不会
+            // 报错、只会什么都不做。手写 --config 同样要过这一关。
+            for e in s.boot_problems() {
+                problems.push(format!("作用域 {}（{}）: {e}", s.name, s.id));
+            }
         }
 
         // 每个作用域都该有一个本机地址落在它的网段里，否则收到请求也发不出应答。

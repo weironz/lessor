@@ -153,6 +153,9 @@ struct NewScope {
     lease_secs: Option<u32>,
     #[serde(default)]
     via_relay: bool,
+    /// 网络引导（PXE / iPXE / UEFI HTTP Boot）。不给则只发地址。
+    #[serde(default)]
+    boot: Option<lessor_core::BootConfig>,
 }
 
 async fn post_scope(State(state): State<AppState>, Json(req): Json<NewScope>) -> Response {
@@ -199,6 +202,7 @@ async fn post_scope(State(state): State<AppState>, Json(req): Json<NewScope>) ->
     scope.router = req.router;
     scope.dns = req.dns;
     scope.via_relay = req.via_relay;
+    scope.boot = req.boot.filter(|b| !b.is_empty());
     if let Some(secs) = req.lease_secs {
         scope.lease_secs = secs;
         scope.offer_secs = 30.min(secs);
@@ -230,6 +234,9 @@ struct ScopePatchReq {
     router: Option<Option<Ipv4Addr>>,
     dns: Option<Vec<Ipv4Addr>>,
     lease_secs: Option<u32>,
+    /// 网络引导参数。显式传 null 可以整块清掉。
+    #[serde(default, deserialize_with = "double_option")]
+    boot: Option<Option<lessor_core::BootConfig>>,
 }
 
 /// 区分"字段没出现"和"字段显式为 null" —— 前者是不改，后者是清空。
@@ -262,6 +269,7 @@ async fn patch_scope(
         router: req.router,
         dns: req.dns,
         lease_secs: req.lease_secs,
+        boot: req.boot,
     };
     match state.patch_scope(ScopeId(id), patch).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),

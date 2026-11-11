@@ -15,6 +15,10 @@
 
   const pct = (s) => (s.capacity === 0 ? 0 : Math.round((s.used / s.capacity) * 100))
 
+  // 引导配置只读展示。改它要写四个字段（文件名、next-server、HTTP URL、
+  // iPXE 脚本），随手一个输入框改不完整，容易改出"地址拿到了机器不动"。
+  const bootSummary = (b) => b?.ipxeUrl ?? b?.httpUrl ?? b?.filename ?? '未配置'
+
   async function run(id, fn) {
     busy = id
     err = null
@@ -121,6 +125,8 @@
           <dd class="mono">{s.poolStart && s.poolEnd ? `${s.poolStart} – ${s.poolEnd}` : '仅静态保留'}</dd>
           <dt>网关</dt>
           <dd class="mono">{s.router ?? '—'}</dd>
+          <dt>网络引导</dt>
+          <dd class="mono boot" title={bootSummary(s.boot)}>{bootSummary(s.boot)}</dd>
         </dl>
 
 				{#if !s.viaRelay && s.listenerPresent === false}
@@ -231,6 +237,8 @@
   }
   dt { color: var(--muted); }
   dd { margin: 0; text-align: right; }
+  /* 引导 URL 往往很长，撑开卡片会把整个列表挤变形 */
+  dd.boot { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .usage {
     display: flex;
     align-items: center;

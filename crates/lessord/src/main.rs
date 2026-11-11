@@ -4,6 +4,7 @@
 //! 顺带开一个 HTTP 端口几乎是免费的。界面则是普通权限的纯客户端。
 
 mod api;
+mod boot;
 mod capture;
 mod config;
 mod conflict;
@@ -82,6 +83,26 @@ struct Cli {
     /// 一样的 --boot-file —— 那通常就是 iPXE 自己，会无限自举。
     #[arg(long, value_name = "URL")]
     ipxe_url: Option<String>,
+
+    /// 引导文件目录。给了就起内置的只读 TFTP + HTTP 文件服务，并把还没配
+    /// 引导目标的作用域指向本机。目录里放 ipxe.efi / bootx64.efi /
+    /// boot.ipxe 即可，见 docs/boot-server.md。
+    #[arg(long, value_name = "目录")]
+    boot_dir: Option<PathBuf>,
+
+    /// 引导文件 HTTP 服务的监听地址。默认取第一个 DHCP 监听器地址:8081。
+    /// 这个服务只有静态文件，与管理接口分开，写操作守卫不适用于它。
+    #[arg(long, value_name = "地址:端口")]
+    boot_http: Option<SocketAddr>,
+
+    /// 内置 TFTP 端口，默认 69。测试时可以用高位端口免特权。
+    #[arg(long, default_value_t = 69, value_name = "端口")]
+    tftp_port: u16,
+
+    /// 内置 TFTP 绑定地址。默认与第一个 DHCP 监听器同地址 ——
+    /// next-server 指向的就是它。
+    #[arg(long, value_name = "IP")]
+    tftp_bind: Option<Ipv4Addr>,
 
     /// 额外的原始 DHCP 选项，形如 43=060108ff（编号=十六进制），可重复
     #[arg(long = "option", value_name = "编号=十六进制")]
@@ -188,6 +209,7 @@ struct Started {
     idle_exit: Option<u64>,
     capture: Option<PathBuf>,
     observe: bool,
+    boot: Option<boot::BootServe>,
 }
 
 impl Cli {
@@ -279,6 +301,36 @@ impl Cli {
                 })?
             }
         };
+        // --boot-dir 是附加能力，不参与上面 --config / 快捷参数二选一：
+        // 不管作用域是从文件读的还是命令行拼的，都能自带文件服务。
+        let boot = match &self.boot_dir {
+            None => None,
+            Some(root) => {
+                if !root.is_dir() {
+                    bail!(
+                        "--boot-dir {} 不是目录 —— 先把引导文件放进去",
+                        root.display()
+                    );
+                }
+                let Some(first) = cfg.listeners.first().map(|l| l.server_ip) else {
+                    bail!(
+                        "--boot-dir 需要至少一个 DHCP 监听器来确定 next-server 与绑定地址；\
+                         先给 --listen，或在 --config 里写 listeners"
+                    );
+                };
+                let http = self
+                    .boot_http
+                    .unwrap_or_else(|| SocketAddr::new(std::net::IpAddr::V4(first), 8081));
+                Some(boot::BootServe {
+                    root: root.clone(),
+                    http,
+                    tftp_bind: self.tftp_bind.unwrap_or(first),
+                    tftp_port: self.tftp_port,
+                    next_server: first,
+                })
+            }
+        };
+
         Ok(Started {
             cfg,
             ports,
@@ -292,6 +344,7 @@ impl Cli {
             idle_exit: self.idle_exit,
             capture: self.capture.clone(),
             observe: self.observe,
+            boot,
         })
     }
 }
@@ -386,7 +439,7 @@ async fn main() -> Result<()> {
     }
 
     let Started {
-        cfg,
+        mut cfg,
         ports,
         http: http_addr,
         reap_secs,
@@ -398,7 +451,35 @@ async fn main() -> Result<()> {
         idle_exit,
         capture: capture_path,
         observe,
+        boot: boot_serve,
     } = cli.into_config()?;
+
+    // --boot-dir：把引导目标指向本机，并备一份给界面上新建的作用域。
+    // 必须在 AppState::new 之前改 cfg.scopes —— 决策层读的是这份配置。
+    let default_boot = match &boot_serve {
+        None => None,
+        Some(b) => {
+            let advertise = boot::advertised_addr(b.http, b.next_server);
+            let p = boot::plan(&b.root, advertise, b.next_server);
+            if p.found.is_empty() {
+                warn!(
+                    dir = %b.root.display(),
+                    "引导目录里没认出 ipxe.efi / undionly.kpxe / bootx64.efi / boot.ipxe —— \
+                     文件服务照常起，但 DHCP 暂时不会下发引导目标"
+                );
+            } else {
+                info!(files = ?p.found, "引导目录里找到这些文件");
+            }
+            let filled = boot::fill_defaults(&mut cfg.scopes, &p.boot);
+            info!(
+                filled,
+                tftp = %format!("{}:{}", b.tftp_bind, b.tftp_port),
+                http = %advertise,
+                "网络引导文件服务已配置；引导目标指向本机"
+            );
+            Some(p.boot)
+        }
+    };
 
     // 非 Linux 上没有把 socket 钉在网卡上的办法，多监听器时无法判断
     // 包从哪块网卡进来，可能把请求算到错误的作用域上。
@@ -420,6 +501,27 @@ async fn main() -> Result<()> {
         );
     }
 
+    for s in &cfg.scopes {
+        if let Some(b) = &s.boot {
+            info!(
+                scope = %s.name,
+                file = ?b.filename,
+                next_server = ?b.next_server,
+                http_url = ?b.http_url,
+                ipxe_url = ?b.ipxe_url,
+                "网络引导已配置"
+            );
+            // URL 写错、自举这类问题不会让服务起不来，但必须说出来 ——
+            // 固件那边的失败形态是"什么都不做"
+            for w in s.boot_warnings() {
+                warn!(scope = %s.name, "{w}");
+            }
+            if let Some(p) = s.boot_problems().into_iter().next() {
+                bail!("作用域 {} 的引导配置有问题：{p}", s.name);
+            }
+        }
+    }
+
     if cfg.scopes.is_empty() {
         info!("没有作用域，暂不应答任何 DHCP 请求 —— 在界面上新建一个即可开始服务");
     }
@@ -435,7 +537,8 @@ async fn main() -> Result<()> {
         .with_token(token)
         .with_listener_spawner(new_listener_tx)
         .with_config_path(config_path)
-        .with_discovery_path(discovery_path);
+        .with_discovery_path(discovery_path)
+        .with_default_boot(default_boot);
 
     let capture = match &capture_path {
         Some(p) => {
@@ -459,6 +562,31 @@ async fn main() -> Result<()> {
     }
 
     let mut tasks = tokio::task::JoinSet::new();
+
+    // 引导文件服务。与管理接口分开监听，出错只记日志、不拖垮 DHCP 主循环 ——
+    // 现场即使忘了放引导文件，发地址这件事也该照常能用。
+    if let Some(b) = &boot_serve {
+        let root = std::sync::Arc::new(b.root.clone());
+        let addr = b.http;
+        let r = root.clone();
+        tasks.spawn(async move {
+            if let Err(e) = boot::serve_http(addr, r).await {
+                // {:#} 打完整因果链 —— 只打外层文案的话，"端口被占"
+                // 这类真正的原因会被藏起来
+                error!(error = %format!("{e:#}"), "引导文件 HTTP 服务退出，客户端拿不到引导文件");
+                // 这个任务在 JoinSet 里，返回就会被当成"服务不完整"而整体退出。
+                // 引导文件服务挂了不该连发地址一起停掉，所以挂在这儿不退。
+                std::future::pending::<()>().await;
+            }
+        });
+        let (bind, port) = (b.tftp_bind, b.tftp_port);
+        tasks.spawn(async move {
+            if let Err(e) = boot::serve_tftp(bind, port, root).await {
+                error!(error = %format!("{e:#}"), "TFTP 服务退出，PXE 客户端拿不到引导文件");
+                std::future::pending::<()>().await;
+            }
+        });
+    }
 
     let spawn_listener =
         |tasks: &mut tokio::task::JoinSet<()>, st: AppState, listener: Listener| {

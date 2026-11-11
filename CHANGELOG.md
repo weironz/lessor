@@ -8,6 +8,33 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`--boot-dir`：内置只读 TFTP 与 HTTP 引导文件服务。** 之前必须另搭
+  dnsmasq / MAAS / 一个 Python 脚本才能装机，现场"带一台笔记本插上网线就
+  开机装"就不成立。现在一条命令起 DHCP + TFTP(69) + HTTP(8081)，按目录里
+  实际存在的 `ipxe.efi` / `undionly.kpxe` / `bootx64.efi` / `boot.ipxe`
+  推导引导目标，只填进还没配引导的作用域。配套 `--boot-http` /
+  `--tftp-port` / `--tftp-bind`。见 [docs/boot-server.md](docs/boot-server.md)
+- **网络引导参数可以在运行时改。** `POST /api/scopes` 与
+  `PATCH /api/scopes` 都接受 `boot`（`serverName` / `filename` /
+  `nextServer` / `httpUrl` / `ipxeUrl`），PATCH 显式传 `null` 清空。
+  之前只能启动时给 CLI 或手写配置文件。`GET /api/state` 一并回显
+
+### Fixed
+
+- **引导文件服务端口被占时会把整个服务带停。** 那个任务挂在 `JoinSet` 里，
+  出错返回后被当成"服务不完整"，连 DHCP 一起退出 —— 和"发地址不该被装机
+  功能拖累"正好相反。现在记完错误就留在原地，日志也打完整因果链，
+  "端口被占"这种真因不再被外层文案盖住
+
+### Changed
+
+- 引导配置的校验收进 `lessor-core`：`httpUrl` / `ipxeUrl` 必须是完整 URL
+  （固件拿到裸文件名会当 URL 解析然后什么都不做，现象是"地址拿到了、
+  机器不动"）；配了 iPXE 二进制却没配脚本会告警无限自举。启动加载与
+  运行时改配置走同一份校验
+
 ## [0.0.9] - 2026-09-10
 
 ### Added
