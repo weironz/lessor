@@ -35,6 +35,20 @@
   机器不动"）；配了 iPXE 二进制却没配脚本会告警无限自举。启动加载与
   运行时改配置走同一份校验
 
+## [0.0.10] - 2026-09-14
+
+### Fixed
+
+- 发现页把「DHCP 租约」与「地址发现」拆成两列：租约有效只表示地址仍被
+  DHCP 保留，不代表设备在线或仍走 DHCP；发现地址另标证据来源（IPMI 应答、
+  地址探测、邻居表或已保存记录），不再把历史地址误读成当前状态
+- 发布流水线给 NSIS 下载加失败重试，减少偶发网络抖动把发版打断
+
+### Changed
+
+- 「关于」对话框去掉项目主页与更新日志外链；未配置更新公钥时的提示
+  不再指向项目主页
+
 ## [0.0.9] - 2026-09-10
 
 ### Added
@@ -83,6 +97,32 @@
   数据卷第一次挂上来是空的，`docker compose up` 必然第一次就失败，人得先
   手工造一个 JSON。现在文件不存在就按空配置起（零作用域不应答任何请求，
   安全），界面上建好之后写进去。**目录**不存在仍然报错，那多半是路径写错了
+
+## [0.0.6] - 2026-09-06
+
+### Added
+
+- 新建作用域按**地址**（而非网卡名）选择监听点：一张网卡同时有普通地址和
+  APIPA 地址时不再选错；也不再自动选第一块网卡 —— 虚拟网卡、VPN 常排在
+  物理网卡之前，误选后看似服务已启动，实际收不到直连设备的广播
+- 界面标出「监听地址已不在本机」：网卡被换走或地址被改掉时，配置会保留，
+  但不再让人对着一个收不到包的作用域发愣
+
+### Fixed
+
+- 配置校验拒绝「地址池包含监听地址」，默认地址池也避开它 —— 客户端拿到
+  服务端自己的地址会触发 ARP 冲突，Windows 会把本机地址标成 Duplicate，
+  服务端随即失去正常通信能力
+- 多地址网卡的发现结果优先归属 DHCP 正在监听的那个地址；没有作用域时
+  才退回第一个地址。Windows 会把 APIPA 排在手工地址之前，只取第一个 IPv4
+  会让发现结果挂到错的地址上
+- 为 `stop_local_server` 补 Tauri 权限定义：自定义命令不在任何插件下，
+  原来被 ACL 拦下时报 "Plugin not found"（听着像命令没注册），自动更新
+  因此装不下去。停服务发生在下载之前，失败时本机 lessord 不受影响
+
+`justfile`、生产部署 compose 与 `--config` 空文件自举那批改动也随本版进入
+代码，但当时留在 `[Unreleased]` 没归版，发 0.0.7 时被一并归进了下面的
+0.0.7 条目 —— 按代码归属它们属于这一版，此处保留原记录不改。
 
 ## [0.0.5] - 2026-08-29
 
@@ -301,10 +341,12 @@ lessord --install-service --config /var/lib/lessord/lessor.json ...
   （`registry.cn-shenzhen.aliyuncs.com/willspace/lessord`）镜像；
   NSIS 桌面安装程序；Linux / Windows 命令行压缩包
 
-[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.9...HEAD
+[Unreleased]: https://github.com/weironz/lessor/compare/v0.0.10...HEAD
+[0.0.10]: https://github.com/weironz/lessor/compare/v0.0.9...v0.0.10
 [0.0.9]: https://github.com/weironz/lessor/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/weironz/lessor/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/weironz/lessor/compare/v0.0.6...v0.0.7
+[0.0.6]: https://github.com/weironz/lessor/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/weironz/lessor/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/weironz/lessor/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/weironz/lessor/compare/v0.0.2...v0.0.3
